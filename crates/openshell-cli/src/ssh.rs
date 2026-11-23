@@ -2255,6 +2255,8 @@ fn render_ssh_config(gateway: &str, name: &str, workspace: &str) -> Result<Strin
         .map(|(key, value)| format!("    {key} {value}"))
         .collect::<Vec<_>>()
         .join("\n");
+    // The alias does not name the gateway. A connection the user shares would
+    // also serve the sandbox of the same name on another gateway, unchecked.
     Ok(format!(
         "Host {host_alias}\n    User sandbox\n{options}\n    ControlMaster no\n    ControlPath none\n    ControlPersist no\n    LogLevel ERROR\n    ServerAliveInterval 15\n    ServerAliveCountMax 3\n    ProxyCommand {proxy_cmd}\n"
     ))
