@@ -24,6 +24,10 @@ use provider_rotation::{
 use serde_json::{Value, json};
 use testkit::{CliChild, Context, Error, PYTHON_BINARIES, Result, Sandbox};
 
+fn main() -> std::process::ExitCode {
+    testkit::main()
+}
+
 const READY: &str = "rotation-client-ready";
 const START_TIMEOUT: Duration = Duration::from_secs(60);
 

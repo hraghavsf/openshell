@@ -25,6 +25,10 @@ use testkit::{Context, Error, Poll, Result, ResultExt as _, Sandbox, poll_until}
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::net::{TcpListener, TcpStream};
 
+fn main() -> std::process::ExitCode {
+    testkit::main()
+}
+
 const TEST_HOST: &str = "host.openshell.internal";
 const USER_SUBJECT_TOKEN: &str = "stored-user-token";
 const INTERMEDIATE_TOKEN: &str = "intermediate-token";

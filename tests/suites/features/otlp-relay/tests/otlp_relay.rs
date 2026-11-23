@@ -16,6 +16,10 @@ use otlp_support::{Attributes, Collector, SANDBOX_ID_KEY, SOURCE_KEY, SOURCE_VAL
 use testkit::sdk::SandboxPhase;
 use testkit::{Context, Error, Result, ResultExt as _};
 
+fn main() -> std::process::ExitCode {
+    testkit::main()
+}
+
 const ENV_ENDPOINT: &str = "OTEL_EXPORTER_OTLP_ENDPOINT";
 const ENV_PROTOCOL: &str = "OTEL_EXPORTER_OTLP_PROTOCOL";
 const ENV_COLLECTOR: &str = "OPENSHELL_OTLP_ENDPOINT";

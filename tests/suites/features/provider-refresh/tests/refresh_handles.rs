@@ -15,6 +15,10 @@ use host_server_support::{HttpRecorder, Request, Response, TEST_HOST};
 use serde_json::json;
 use testkit::{Context, PYTHON_BINARIES, Poll, Result, Sandbox, policy, poll_until};
 
+fn main() -> std::process::ExitCode {
+    testkit::main()
+}
+
 const TOKEN_ENV: &str = "REFRESH_E2E_ACCESS_TOKEN";
 const BOOTSTRAP_TOKEN: &str = "bootstrap-token";
 const ROTATIONS: usize = 12;

@@ -24,6 +24,10 @@ use provider_rotation::{
 use serde_json::{Value, json};
 use testkit::{Context, Error, PYTHON_BINARIES, Result, Sandbox};
 
+fn main() -> std::process::ExitCode {
+    testkit::main()
+}
+
 /// The main process's client name in [`probe`].
 const CLIENT_NAME: &str = "main";
 /// How long the main process has to start before it answers the first probe.
