@@ -1039,7 +1039,7 @@ async fn handle_shell_connect(
     disable_raw_mode().into_diagnostic()?;
 
     // Step 8: Spawn SSH as child process and wait.
-    if let Some(warning) = unverified_warning {
+    if let Some(warning) = &unverified_warning {
         eprintln!("{warning}");
     }
     let status = tokio::task::spawn_blocking(move || command.status()).await;
@@ -1056,6 +1056,11 @@ async fn handle_shell_connect(
         _ => {
             app.status_text = format!("Disconnected from {sandbox_name}");
         }
+    }
+    // `ssh` takes the terminal right after the warning above, so repeat it,
+    // first because the status line is cut at the terminal width.
+    if unverified_warning.is_some() {
+        app.status_text.insert_str(0, "SSH host key NOT verified; ");
     }
 
     // Step 9: Resume and draw the TUI before accepting new terminal input.
@@ -1179,7 +1184,7 @@ async fn handle_exec_command(
     disable_raw_mode().into_diagnostic()?;
 
     // Step 5: Run command — blocks until user Ctrl-C's or command exits.
-    if let Some(warning) = unverified_warning {
+    if let Some(warning) = &unverified_warning {
         eprintln!("{warning}");
     }
     let status = tokio::task::spawn_blocking(move || ssh.status()).await;
@@ -1196,6 +1201,11 @@ async fn handle_exec_command(
         _ => {
             app.status_text = format!("Command finished on {sandbox_name}");
         }
+    }
+    // `ssh` takes the terminal right after the warning above, so repeat it,
+    // first because the status line is cut at the terminal width.
+    if unverified_warning.is_some() {
+        app.status_text.insert_str(0, "SSH host key NOT verified; ");
     }
 
     // Step 6: Resume TUI.

@@ -920,9 +920,25 @@ openshell sandbox ssh-config my-sandbox
 Append the output to `~/.ssh/config` or use `--editor` on `sandbox create`/`sandbox connect` for automatic setup.
 
 SSH config entries that an earlier release generated accept any host key.
-They keep working and print a warning on every connection. Replace each pasted
-entry with new `openshell sandbox ssh-config` output, or use `--editor` on
-`sandbox connect` again for that sandbox.
+They keep working and print a warning on every connection. Using `--editor` on
+`sandbox create` or `sandbox connect` replaces that sandbox's entry, and every
+other `openshell-<sandbox>.<workspace>` entry in the OpenShell-managed SSH
+include file (`~/.config/openshell/ssh_config`) that you did not edit.
+
+To repair an entry that still prints the warning:
+
+- For an entry you edited, use `--editor` on `sandbox connect` for that
+  sandbox, then add your options to the new entry.
+- For an entry named `openshell-<sandbox>`, with no workspace, delete it from
+  the include file, then use `--editor` on `sandbox connect` for that sandbox.
+  The new entry is named `openshell-<sandbox>.<workspace>`.
+- For an entry you pasted into `~/.ssh/config`, replace it with new
+  `openshell sandbox ssh-config` output.
+
+A replaced entry runs the `openshell` executable that replaced it. If you had
+changed that path, change it again. After a downgrade, replaced entries stop
+connecting, because earlier releases do not accept `--known-hosts`. Use
+`--editor` on `sandbox connect` with the downgraded CLI for each sandbox.
 
 Unverified connections go ahead by default. Set
 `OPENSHELL_SSH_REQUIRE_HOST_KEY=1` to refuse every unverified connection, to a

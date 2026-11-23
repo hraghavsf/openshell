@@ -4805,6 +4805,7 @@ dependencies = [
  "rustls",
  "serde",
  "serde_json",
+ "shell-words",
  "tar",
  "temp-env",
  "tempfile",

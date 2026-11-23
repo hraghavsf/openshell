@@ -2345,6 +2345,41 @@ fn host_line_matches(line: &str, alias: &str) -> bool {
         .any(|token| token == alias)
 }
 
+/// What `render_ssh_config` wrote before host-key verification. With this
+/// entry, `ssh` accepts any host key.
+fn earlier_release_ssh_config(exe: &str, gateway: &str, name: &str, workspace: &str) -> String {
+    format!(
+        "Host {}\n    User sandbox\n    StrictHostKeyChecking no\n    UserKnownHostsFile /dev/null\n    GlobalKnownHostsFile /dev/null\n    LogLevel ERROR\n    ServerAliveInterval 15\n    ServerAliveCountMax 3\n    ProxyCommand {} ssh-proxy --gateway-name {} --name {} --workspace {}\n",
+        host_alias(name, workspace),
+        shell_escape(exe),
+        shell_escape(gateway),
+        shell_escape(name),
+        shell_escape(workspace),
+    )
+}
+
+/// Replaces each entry an earlier release wrote with the one this release
+/// writes for the same sandbox. Only an entry that is still that text, line
+/// for line, is replaced: one the user edited may hold options to keep. The
+/// executable is not compared, because each release named its own path.
+fn replace_earlier_release_entries(contents: &str) -> String {
+    let mut updated = contents.to_string();
+    let commands = contents
+        .lines()
+        .filter_map(|line| line.trim_start().strip_prefix("ProxyCommand "));
+    for command in commands {
+        // An entry that cannot be rendered stays, and warns when it is used.
+        if let Ok(args) = shell_words::split(command)
+            && let [exe, _, _, gateway, _, name, _, workspace] = args.as_slice()
+            && let Ok(entry) = render_ssh_config(gateway, name, workspace)
+        {
+            let earlier = earlier_release_ssh_config(exe, gateway, name, workspace);
+            updated = updated.replace(&earlier, &entry);
+        }
+    }
+    updated
+}
+
 fn upsert_host_block(contents: &str, alias: &str, block: &str) -> String {
     let lines: Vec<&str> = contents.lines().collect();
     let start = lines.iter().position(|line| host_line_matches(line, alias));
@@ -2394,7 +2429,7 @@ pub fn install_ssh_config(gateway: &str, name: &str, workspace: &str) -> Result<
 
     let alias = host_alias(name, workspace);
     let contents = fs::read_to_string(&managed_config).unwrap_or_default();
-    let updated = upsert_host_block(&contents, &alias, &block);
+    let updated = replace_earlier_release_entries(&upsert_host_block(&contents, &alias, &block));
     fs::write(&managed_config, updated)
         .into_diagnostic()
         .wrap_err("failed to write OpenShell SSH config")?;
@@ -2918,6 +2953,56 @@ mod tests {
                     1
                 );
                 assert!(managed_contents.contains("ProxyCommand"));
+            });
+    }
+
+    #[test]
+    fn install_ssh_config_replaces_the_entries_an_earlier_release_wrote() {
+        let home = tempfile::tempdir().unwrap();
+        let xdg = tempfile::tempdir().unwrap();
+        let earlier = |gateway, name| {
+            earlier_release_ssh_config("/opt/open shell/openshell", gateway, name, "beta")
+        };
+        // Not replaced: an entry with an option the user added, and one from
+        // before workspaces.
+        let kept = [
+            earlier("my-gw", "edited").replace("    LogLevel", "    ForwardAgent no\n    LogLevel"),
+            earlier("my-gw", "old")
+                .replace("openshell-old.beta", "openshell-old")
+                .replace(" --workspace beta", ""),
+        ]
+        .concat();
+        let added_after = "    LocalForward 3000 localhost:3000\n";
+
+        Environment::new()
+            .set("HOME", home.path())
+            .set("XDG_CONFIG_HOME", xdg.path())
+            .run(|| {
+                let managed = openshell_ssh_config_path().unwrap();
+                fs::create_dir_all(managed.parent().unwrap()).unwrap();
+                let written = [
+                    kept.as_str(),
+                    // Copied from a release, so the text compared against stays true to it.
+                    "Host openshell-one.beta\n    User sandbox\n    StrictHostKeyChecking no\n    UserKnownHostsFile /dev/null\n    GlobalKnownHostsFile /dev/null\n    LogLevel ERROR\n    ServerAliveInterval 15\n    ServerAliveCountMax 3\n    ProxyCommand '/opt/open shell/openshell' ssh-proxy --gateway-name 'my gw' --name one --workspace beta\n",
+                    added_after,
+                    &earlier("my-gw", "two"),
+                ];
+                fs::write(&managed, written.concat()).unwrap();
+
+                install_ssh_config("my-gw", "demo", "default").unwrap();
+
+                let installed = fs::read_to_string(&managed).unwrap();
+                let expected = [
+                    kept.as_str(),
+                    &render_ssh_config("my gw", "one", "beta").unwrap(),
+                    added_after,
+                    &render_ssh_config("my-gw", "two", "beta").unwrap(),
+                    "\n",
+                    &render_ssh_config("my-gw", "demo", "default").unwrap(),
+                ];
+                assert_eq!(installed, expected.concat());
+                install_ssh_config("my-gw", "demo", "default").unwrap();
+                assert_eq!(fs::read_to_string(&managed).unwrap(), installed);
             });
     }
 
