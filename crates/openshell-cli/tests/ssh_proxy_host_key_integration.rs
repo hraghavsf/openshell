@@ -225,17 +225,16 @@ async fn openshell(args: &str, config: &Path, require_host_key: bool) -> Output 
     finished(command, config, require_host_key).await
 }
 
-fn mismatch_message(published: &PrivateKey, presented: &PrivateKey) -> String {
-    format!(
-        "openshell: SSH host key mismatch for sandbox '{SANDBOX}' (workspace '{WORKSPACE}')\n  \
-         gateway published: {}\n  \
-         server presented:  {}\n\
-         The SSH server reached through the gateway is not this sandbox's. The handshake was not forwarded.\n\
-         Do not connect. Compare the published value with `openshell --workspace {WORKSPACE} sandbox get {SANDBOX} --output json`, then stop and start the sandbox.\n\
-         If the mismatch persists, contact the gateway operator.\n",
-        fingerprint(published),
-        fingerprint(presented)
-    )
+/// The lines of the refusal that name the sandbox and both keys. The CLI wraps
+/// the lines after them to the terminal width.
+fn assert_mismatch_reported(stderr: &str, published: &PrivateKey, presented: &PrivateKey) {
+    for line in [
+        format!("SSH host key mismatch for sandbox '{SANDBOX}' (workspace '{WORKSPACE}')"),
+        format!("gateway published: {}", fingerprint(published)),
+        format!("server presented:  {}", fingerprint(presented)),
+    ] {
+        assert!(stderr.contains(&line), "{stderr}");
+    }
 }
 
 /// What an SSH server presenting `key` sends: up to its key exchange reply,
@@ -291,10 +290,7 @@ async fn name_mode_proxy_withholds_a_key_the_gateway_did_not_publish() {
         before_reply.starts_with(&proxy.stdout),
         "no byte of the key exchange reply may reach ssh"
     );
-    assert!(
-        stderr.contains(&mismatch_message(&published, &presented)),
-        "{stderr}"
-    );
+    assert_mismatch_reported(&stderr, &published, &presented);
     assert_eq!(std::fs::read_to_string(&pin).unwrap(), pin_content(None));
 }
 
@@ -590,10 +586,7 @@ mod openssh {
 
         let stderr = String::from_utf8_lossy(&ssh.stderr);
         assert_eq!(ssh.status.code(), Some(255), "{stderr}");
-        assert!(
-            stderr.contains(&mismatch_message(&published, &presented)),
-            "{stderr}"
-        );
+        assert_mismatch_reported(&stderr, &published, &presented);
         assert_eq!(ssh.stdout, b"");
         assert_eq!(std::fs::read_to_string(&pin).unwrap(), pin_content(None));
     }

@@ -2105,13 +2105,7 @@ async fn relay_ssh_proxy(
             let data = match gate.as_mut().map(|gate| gate.push(&data)) {
                 None => data,
                 Some(Ok(released)) => released,
-                Some(Err(refusal)) => {
-                    // Printed rather than returned: ssh passes this text to the
-                    // user as is, and a returned error would be reformatted as
-                    // a report.
-                    eprintln!("openshell: {refusal}");
-                    std::process::exit(1)
-                }
+                Some(Err(refusal)) => return Err(miette::miette!("{refusal}")),
             };
             if data.is_empty() {
                 continue;
