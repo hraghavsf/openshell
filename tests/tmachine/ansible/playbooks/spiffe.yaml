@@ -6,8 +6,9 @@
 #
 # The gateway reads its Workload API socket only from
 # OPENSHELL_GATEWAY_SPIFFE_WORKLOAD_API_SOCKET. The packaged gateway is a
-# systemd user service whose installer rewrites gateway.env, so a user-unit
-# drop-in sets the variable. Supervisors use the driver's
+# systemd user service whose installer rewrites gateway.env, and the binaries
+# installer runs a system service, so a drop-in for each unit sets the
+# variable. Supervisors use the driver's
 # provider_spiffe_workload_api_socket. Podman supervisors share the test VM's
 # network, so they reach the test's listener over loopback. Nothing listens
 # until a test starts its Workload API. The SPIFFE fixture
@@ -39,25 +40,27 @@
         group: tmachine
         mode: "0755"
 
-    - name: Create the gateway user-unit drop-in directory
+    - name: Create the gateway unit drop-in directories
       become: true
       ansible.builtin.file:
-        path: /etc/systemd/user/openshell-gateway.service.d
+        path: "{{ item }}/openshell-gateway.service.d"
         state: directory
         owner: root
         group: root
         mode: "0755"
+      loop: [/etc/systemd/user, /etc/systemd/system]
 
     - name: Point the gateway at the test's Workload API
       become: true
       ansible.builtin.copy:
-        dest: /etc/systemd/user/openshell-gateway.service.d/spiffe.conf
+        dest: "{{ item }}/openshell-gateway.service.d/spiffe.conf"
         owner: root
         group: root
         mode: "0644"
         content: |
           [Service]
           Environment=OPENSHELL_GATEWAY_SPIFFE_WORKLOAD_API_SOCKET={{ spiffe_gateway_socket }}
+      loop: [/etc/systemd/user, /etc/systemd/system]
 
     - name: Point supervisors at the test's Workload API
       ansible.builtin.include_role:
