@@ -86,6 +86,7 @@ async fn independent_grants_across_sandboxes(cx: &mut Context) -> testkit::Resul
         unreachable!("two sandboxes")
     };
 
+    let mut after_first = None;
     for round in ["first", "cached"] {
         let (from_a, from_b) = tokio::join!(
             probe(a, target_port, "/resource/a", false),
@@ -101,17 +102,17 @@ async fn independent_grants_across_sandboxes(cx: &mut Context) -> testkit::Resul
                     .all(|(service, identity)| *service > 0 && *identity > 0),
                 "each provider did not acquire both credentials: {issued:?}"
             );
+            after_first = Some(issued);
         }
     }
-    let issued = observations.issued();
     testkit::ensure!(
         observations.target_rejected.load(Ordering::SeqCst) == 0,
         "the target rejected a request with mismatched or untrusted credentials, even if a retry then passed"
     );
-    // The first round's check passed, so any difference is the second round.
+    let issued = observations.issued();
     testkit::ensure!(
-        observations.issued() == issued,
-        "repeat requests acquired credentials again instead of using the caches"
+        Some(issued) == after_first,
+        "repeat requests acquired credentials again instead of using the caches: {after_first:?} after the first round, {issued:?} after the cached round"
     );
 
     let target_requests = observations.target_requests.load(Ordering::SeqCst);
