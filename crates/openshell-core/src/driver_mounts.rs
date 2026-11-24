@@ -5,7 +5,7 @@
 
 use std::path::Path;
 
-use crate::container_paths::{CONTROL_ROOTS, OCI_RUNTIME_MOUNT_ROOTS};
+use crate::container_paths::{CONTROL_ROOTS, OCI_RUNTIME_MOUNT_ROOTS, OPENSHELL_ROOT};
 
 /// `SELinux` relabelling mode for bind mounts.
 ///
@@ -31,9 +31,31 @@ pub enum SelinuxLabel {
 /// directory and by drivers whose workspace remains fixed.
 pub const DEFAULT_WORKSPACE_ROOT: &str = "/sandbox";
 
+/// How the VM driver selects the workspace for a new sandbox.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "clap", derive(clap::ValueEnum))]
+#[serde(rename_all = "snake_case")]
+pub enum VmWorkspaceMode {
+    /// Prepare the configured directory for the sandbox account.
+    #[default]
+    Managed,
+    /// Use the workload image's working directory when it supplies one.
+    Image,
+}
+
+impl VmWorkspaceMode {
+    /// Return the mode spelling used by the driver CLI and guest metadata.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Managed => "managed",
+            Self::Image => "image",
+        }
+    }
+}
+
 /// Paths reserved by VM guest initialization.
 pub const VM_RESERVED_GUEST_PATHS: &[&str] = &[
-    "/.openshell",
+    OPENSHELL_ROOT,
     "/.openshell-bootstrap",
     "/overlay",
     "/lower",
@@ -149,6 +171,10 @@ pub fn resolve_vm_image_workspace_root(working_dir: &str) -> Result<String, Stri
 }
 
 /// Resolve a VM workspace that guest init will assign to the sandbox user.
+///
+/// Guest init changes the directory's owner and permissions and makes it the
+/// account home. Protect system trees from that operation. For `/home` and
+/// `/var`, protect the directory itself so workspaces can live below it.
 pub fn resolve_vm_managed_workspace_root(root: &str) -> Result<String, String> {
     if root.is_empty() || root == "/" || root.contains(':') {
         return Err("VM workspace_root must be a non-root absolute path without ':'".to_string());

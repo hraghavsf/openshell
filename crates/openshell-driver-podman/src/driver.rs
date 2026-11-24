@@ -11,6 +11,7 @@ use crate::watcher::{
     driver_sandbox_from_list_entry,
 };
 use openshell_core::config::CDI_GPU_DEVICE_ALL;
+use openshell_core::container_paths::OPENSHELL_ROOT;
 use openshell_core::driver_utils::{
     SANDBOX_RUNTIME_IMAGE_BINARY_PATH, extract_first_tar_entry, supervisor_image_should_refresh,
     temp_extract_container_name, validate_linux_elf_binary, write_cache_binary_atomic,
@@ -1684,7 +1685,7 @@ impl PodmanComputeDriver {
             async {
                 // Do not let image-controlled symlinks alias the protected channel
                 // into an agent-readable subtree before Podman mounts it.
-                match self.client.copy_from_container(&id, "/.openshell").await {
+                match self.client.copy_from_container(&id, OPENSHELL_ROOT).await {
                     Err(PodmanApiError::NotFound(_)) => {}
                     Ok(_) => return Err(ComputeDriverError::Precondition(
                         "workload images must not prepopulate the reserved /.openshell hierarchy"

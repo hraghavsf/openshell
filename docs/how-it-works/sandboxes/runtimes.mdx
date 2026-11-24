@@ -255,9 +255,9 @@ workspace_mode = "managed"
 workspace_root = "/home/agent"
 ```
 
-OpenShell prepares the selected directory for the sandbox user and preserves ownership of existing contents in custom managed directories.
+At startup, OpenShell prepares a custom managed directory for the sandbox user and sets it as the account home. This step changes ownership of the workspace directory itself. OpenShell rejects reserved guest paths and protected system directories before making these changes.
 
-To use the image's OCI `WORKDIR`, set `workspace_mode = "image"`. The directory must already exist in the guest image without symlink components and be writable by the resolved sandbox user. VM image preparation continues to normalize the compatibility `/sandbox` tree. Images with an unset `WORKDIR`, `/`, or `/sandbox`, and rootfs tar archives without OCI metadata, use the managed `/sandbox` workspace.
+To use the image's OCI `WORKDIR`, set `workspace_mode = "image"`. The directory must already exist without symlink components, avoid reserved guest paths, and be writable by the resolved sandbox user. At startup, guest init skips managed workspace setup for a custom image directory and chooses the sandbox account's home in `/etc/passwd` independently. Image preparation still normalizes the compatibility `/sandbox` tree. Images with an unset `WORKDIR`, `/`, or `/sandbox`, and rootfs tar archives without OCI metadata, use the managed `/sandbox` workspace.
 
 Each sandbox keeps its selected workspace across stop and start. The workspace lives on the sandbox's writable guest overlay.
 

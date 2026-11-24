@@ -6,6 +6,7 @@
 use crate::client::ImageInspect;
 use crate::config::PodmanComputeConfig;
 use openshell_core::ComputeDriverError;
+use openshell_core::container_paths::OPENSHELL_ROOT;
 use openshell_core::driver_mounts::SelinuxLabel;
 use openshell_core::gpu::validate_cdi_device_names;
 #[cfg(test)]
@@ -55,7 +56,7 @@ const CONTAINER_PREFIX: &str = "openshell-";
 /// Volume name prefix.
 const VOLUME_PREFIX: &str = "openshell-sandbox-";
 const PODMAN_WORKLOAD_CONTROL_PATHS: &[&str] = &[
-    "/.openshell",
+    OPENSHELL_ROOT,
     openshell_sandbox_backend::SUPERVISOR_CA_RUNTIME_ROOT,
 ];
 
@@ -1056,7 +1057,7 @@ fn podman_driver_config(
 
 fn validate_container_mount_target(target: &str) -> Result<(), String> {
     driver_mounts::validate_container_mount_target(target)?;
-    driver_mounts::validate_mount_control_path(target, "/.openshell")
+    driver_mounts::validate_mount_control_path(target, OPENSHELL_ROOT)
 }
 
 fn validate_podman_driver_mounts(
@@ -1291,7 +1292,7 @@ fn build_base_spec(
     driver_mounts::validate_workspace_mount_targets(
         user_mounts.targets(),
         &image.workspace_root,
-        &["/.openshell"],
+        &[OPENSHELL_ROOT],
     )
     .map_err(ComputeDriverError::Precondition)?;
     if sandbox

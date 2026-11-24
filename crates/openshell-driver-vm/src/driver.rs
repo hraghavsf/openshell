@@ -46,6 +46,7 @@ use oci_client::secrets::RegistryAuth;
 use oci_client::{Reference, RegistryOperation};
 use openshell_core::UpstreamProxyConfig;
 use openshell_core::config::DEFAULT_STOP_TIMEOUT_SECS;
+pub use openshell_core::driver_mounts::VmWorkspaceMode;
 use openshell_core::driver_mounts::{self, VM_RESERVED_GUEST_PATHS};
 use openshell_core::gpu::{
     driver_gpu_requirements, effective_driver_gpu_count, validate_specific_gpu_device_request,
@@ -242,6 +243,7 @@ const GUEST_INIT_DROPIN_MANIFEST: &str =
     openshell_core::container_paths::VM_GUEST_INIT_DROPIN_MANIFEST;
 const IMAGE_CACHE_ROOT_DIR: &str = "images";
 const IMAGE_CACHE_ROOTFS_IMAGE: &str = "rootfs.ext4";
+const IMAGE_CACHE_WORKDIR_FILE: &str = "workdir-v1.json";
 const OVERLAY_TEMPLATE_CACHE_DIR: &str = "overlay-templates";
 const OVERLAY_TEMPLATE_CACHE_LAYOUT_VERSION: &str = "sandbox-overlay-ext4-v1";
 const SANDBOX_OVERLAY_IMAGE: &str = "overlay.ext4";
@@ -341,25 +343,6 @@ impl std::fmt::Debug for VmNetworkSupervisorTrustSnapshot {
             .field("digest", &self.digest())
             .finish_non_exhaustive()
     }
-}
-
-/// How the VM driver selects a workspace for a new sandbox.
-#[derive(
-    Clone,
-    Copy,
-    Debug,
-    Default,
-    PartialEq,
-    Eq,
-    serde::Serialize,
-    serde::Deserialize,
-    clap::ValueEnum,
-)]
-#[serde(rename_all = "snake_case")]
-pub enum VmWorkspaceMode {
-    #[default]
-    Managed,
-    Image,
 }
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
@@ -4556,6 +4539,7 @@ impl VmDriver {
             })?;
         let cache_identity = prepared_image_cache_identity(&source_image_identity, &self.config);
         let image_path = image_cache_rootfs_image(&self.config.state_dir, &cache_identity);
+        let workdir_path = image_path.with_file_name(IMAGE_CACHE_WORKDIR_FILE);
 
         let cache_hit = tokio::fs::metadata(&image_path).await.is_ok();
         let cache_guard = if cache_hit {
@@ -4568,7 +4552,14 @@ impl VmDriver {
             drop(cache_guard);
             self.publish_prepared_cache_hit(sandbox_id, image_ref, "registry", &cache_identity);
             let working_dir = if inspect_workdir {
-                pull_registry_image_workdir(client, &reference, auth, image_ref).await?
+                self.resolve_cached_registry_workdir(
+                    &workdir_path,
+                    client,
+                    &reference,
+                    auth,
+                    image_ref,
+                )
+                .await?
             } else {
                 None
             };
@@ -4664,12 +4655,72 @@ impl VmDriver {
             &payload,
         )
         .await?;
+        if inspect_workdir {
+            self.cache_registry_workdir(&workdir_path, working_dir.as_deref())
+                .await;
+        }
 
         Ok(PreparedImageDisk {
             image_identity: cache_identity,
             disk_path: image_path,
             working_dir,
         })
+    }
+
+    async fn resolve_cached_registry_workdir(
+        &self,
+        path: &Path,
+        client: &OciClient,
+        pinned_reference: &Reference,
+        auth: &RegistryAuth,
+        image_ref: &str,
+    ) -> Result<Option<String>, Status> {
+        // A missing sidecar needs backfill. JSON null records a verified
+        // config with no WorkingDir so later hits can reuse that result.
+        let cached = tokio::fs::read(path)
+            .await
+            .and_then(|bytes| serde_json::from_slice(&bytes).map_err(std::io::Error::from));
+        match cached {
+            Ok(working_dir) => return Ok(working_dir),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => warn!(
+                path = %path.display(),
+                %error,
+                "vm driver: could not read cached image working directory"
+            ),
+        }
+
+        let working_dir =
+            pull_registry_image_workdir(client, pinned_reference, auth, image_ref).await?;
+        self.cache_registry_workdir(path, working_dir.as_deref())
+            .await;
+        Ok(working_dir)
+    }
+
+    async fn cache_registry_workdir(&self, path: &Path, working_dir: Option<&str>) {
+        let name = format!(
+            ".{IMAGE_CACHE_WORKDIR_FILE}.{}.tmp",
+            unique_image_cache_suffix()
+        );
+        let staged = self
+            .preparation_root
+            .as_ref()
+            .map_or_else(|| path.with_file_name(&name), |root| root.join(&name));
+        let result = async {
+            let bytes = serde_json::to_vec(&working_dir)?;
+            write_private_file(&staged, bytes).await?;
+            // Workers resolving the same pinned image publish the same value.
+            tokio::fs::rename(&staged, path).await
+        }
+        .await;
+        if let Err(error) = result {
+            let _ = tokio::fs::remove_file(&staged).await;
+            warn!(
+                path = %path.display(),
+                %error,
+                "vm driver: could not cache image working directory"
+            );
+        }
     }
 
     async fn reset_image_staging_dir(&self, staging_dir: &Path) -> Result<(), Status> {
@@ -7949,10 +8000,7 @@ fn inject_guest_workspace(overlay_disk: &Path, workspace: &VmWorkspace) -> Resul
     if workspace.root == driver_mounts::DEFAULT_WORKSPACE_ROOT {
         return Ok(());
     }
-    let mode = match workspace.mode {
-        VmWorkspaceMode::Managed => "managed",
-        VmWorkspaceMode::Image => "image",
-    };
+    let mode = workspace.mode.as_str();
     let contents = format!("{mode}\n{}\n", workspace.root);
     write_rootfs_image_file(overlay_disk, OVERLAY_WORKSPACE_FILE, contents.as_bytes())
         .and_then(|()| set_rootfs_image_file_mode(overlay_disk, OVERLAY_WORKSPACE_FILE, 0o600))

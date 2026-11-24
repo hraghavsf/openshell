@@ -15,6 +15,8 @@ pub const RUN_ROOT: &str = "/run/openshell";
 pub const SIDECAR_RUN_ROOT: &str = "/run/openshell-sidecar";
 pub const NETNS_MOUNT_ROOT: &str = "/run/netns";
 pub const NETNS_IPROUTE2_ROOT: &str = "/var/run/netns";
+/// Root of `OpenShell`'s hidden runtime hierarchy inside a workload.
+pub const OPENSHELL_ROOT: &str = "/.openshell";
 
 /// Standard Linux container namespaces that an image-selected workspace must
 /// not contain or enter.

@@ -293,50 +293,71 @@ async fn prepared_registry_cache_rejects_manifest_identity_mismatch() {
 
 #[tokio::test]
 async fn registry_workspace_workdir_is_bound_to_the_cached_image() {
-    let config = r#"{"config":{"WorkingDir":"/home/app"}}"#;
-    let trusted = manifest(config);
-    let image_digest = sha256(&trusted);
-    let config_digest = sha256(config.as_bytes());
-    let registry = Registry::start_with_blobs(
-        image_digest.clone(),
-        HashMap::from([
-            (
-                "latest".to_string(),
-                manifest(r#"{"config":{"WorkingDir":"/other"}}"#),
-            ),
-            (image_digest.clone(), trusted),
-        ]),
-        None,
-        false,
-        HashMap::from([(config_digest.clone(), config.as_bytes().to_vec())]),
-    )
-    .await;
-    let root = tempfile::tempdir().unwrap();
-    let driver = driver(root.path());
-    let identity = prepared_image_cache_identity(&image_digest, &driver.config);
-    let path = image_cache_rootfs_image(root.path(), &identity);
-    fs::create_dir_all(path.parent().unwrap()).unwrap();
-    fs::write(path, b"cached disk").unwrap();
-
-    let reference = registry.reference(None);
-    let client = client();
-    let prepared = driver
-        .ensure_prepared_registry_image_disk(
-            "test",
-            &reference,
-            Path::new("unused"),
-            &client,
-            &RegistryAuth::Anonymous,
-            true,
+    for (config, expected_workdir) in [
+        (
+            r#"{"config":{"WorkingDir":"/home/app"}}"#,
+            Some("/home/app"),
+        ),
+        (r#"{"config":{}}"#, None),
+    ] {
+        let trusted = manifest(config);
+        let image_digest = sha256(&trusted);
+        let config_digest = sha256(config.as_bytes());
+        let registry = Registry::start_with_blobs(
+            image_digest.clone(),
+            HashMap::from([
+                (
+                    "latest".to_string(),
+                    manifest(r#"{"config":{"WorkingDir":"/other"}}"#),
+                ),
+                (image_digest.clone(), trusted),
+            ]),
+            None,
+            false,
+            HashMap::from([(config_digest.clone(), config.as_bytes().to_vec())]),
         )
-        .await
-        .unwrap();
-    assert_eq!(prepared.working_dir.as_deref(), Some("/home/app"));
+        .await;
+        let root = tempfile::tempdir().unwrap();
+        let driver = driver(root.path());
+        let identity = prepared_image_cache_identity(&image_digest, &driver.config);
+        let path = image_cache_rootfs_image(root.path(), &identity);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, b"cached disk").unwrap();
 
-    let requests = registry.requests();
-    assert!(requests.contains(&format!("GET /v2/test/image/manifests/{image_digest}")));
-    assert!(requests.contains(&format!("GET /v2/test/image/blobs/{config_digest}")));
-    assert!(!requests.contains(&"GET /v2/test/image/manifests/latest".to_string()));
+        let reference = registry.reference(None);
+        let client = client();
+        let prepare = || {
+            driver.ensure_prepared_registry_image_disk(
+                "test",
+                &reference,
+                Path::new("unused"),
+                &client,
+                &RegistryAuth::Anonymous,
+                true,
+            )
+        };
+        let prepared = prepare().await.unwrap();
+        assert_eq!(prepared.disk_path, path);
+        assert_eq!(prepared.working_dir.as_deref(), expected_workdir);
+
+        let requests = registry.requests();
+        assert!(requests.contains(&format!("GET /v2/test/image/manifests/{image_digest}")));
+        assert!(requests.contains(&format!("GET /v2/test/image/blobs/{config_digest}")));
+        assert!(!requests.contains(&"GET /v2/test/image/manifests/latest".to_string()));
+
+        let prepared = prepare().await.unwrap();
+        assert_eq!(prepared.disk_path, path);
+        assert_eq!(prepared.working_dir.as_deref(), expected_workdir);
+        let warm_requests = registry.requests();
+        let warm_requests = &warm_requests[requests.len()..];
+        assert!(warm_requests.contains(&"HEAD /v2/test/image/manifests/latest".to_string()));
+        assert!(
+            warm_requests
+                .iter()
+                .all(|request| !request.starts_with("GET /v2/test/image/")),
+            "a warm workdir cache hit pulled image metadata: {warm_requests:?}"
+        );
+    }
 }
 
 #[tokio::test]

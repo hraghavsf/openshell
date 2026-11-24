@@ -243,6 +243,8 @@ Image and writable-overlay preparation run in owned worker processes. Stopping o
 
 At startup, the driver reclaims inactive attempts in this directory. It preserves active attempts, committed image caches, and unmarked staging from older releases. Concurrent preparations serialize image-cache publication; an interrupted attempt cannot publish a partial disk over an existing cache entry. Gateway upload slots for `rootfs_tar_path` keep their existing, separate lifecycle.
 
+After upgrading from a driver that exported local Docker images by tag, the first sandbox using each affected image prepares a new disk from its immutable image ID. Older disks remain on disk and may still be in use by existing sandboxes.
+
 Each sandbox gets its own sparse writable
 `<state-dir>/sandboxes/<id>/overlay.ext4`. Guest init mounts overlayfs as `/`
 with the prepared image rootfs as lowerdir when present, otherwise the bootstrap

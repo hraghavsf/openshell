@@ -4,12 +4,13 @@
 #![cfg(feature = "e2e-vm")]
 
 //! VM-specific E2E coverage for starting sandboxes after a standalone gateway
-//! restart.
+//! restart, including a custom workspace on the gateway-managed VM driver.
 //!
 //! This test is gated behind the `e2e-vm` feature because it requires the VM
 //! driver runtime prepared by `e2e/rust/e2e-vm.sh`.
 
-use std::fs;
+use std::fs::{self, OpenOptions};
+use std::io::Write;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -24,8 +25,24 @@ use tokio::time::sleep;
 
 const READY_MARKER: &str = "vm-gateway-start-ready";
 const STOPPED_READY_MARKER: &str = "vm-gateway-start-stopped-ready";
-const START_FILE: &str = "/sandbox/vm-gateway-start-state";
+const STATE_FILE: &str = "vm-gateway-start-state";
 const VM_STATE_DIR_ENV: &str = "OPENSHELL_E2E_VM_STATE_DIR";
+const CUSTOM_WORKSPACE_ROOT: &str = "/home/openshell-e2e/workspace";
+
+const CHECK_WORKSPACE: &str = r#"set -eu
+workdir=$(pwd -P)
+if [ "$workdir" != "$1" ]; then
+    printf 'working directory: expected %s, got %s\n' "$1" "$workdir" >&2
+    exit 1
+fi
+if [ "$1" != /sandbox ]; then
+    home=$(getent passwd sandbox | cut -d: -f6)
+    if [ "$home" != "$1" ]; then
+        printf 'sandbox account home: expected %s, got %s\n' "$1" "$home" >&2
+        exit 1
+    fi
+fi
+"#;
 
 #[derive(Clone, PartialEq, Message)]
 struct PersistedDriverSandbox {
@@ -95,22 +112,49 @@ async fn vm_gateway_restart_preserves_running_and_stopped_intent() {
         return;
     };
 
+    let workspace_root =
+        if std::env::var("OPENSHELL_E2E_EXTERNAL_COMPUTE_DRIVER").as_deref() == Ok("1") {
+            // The shell wrapper starts the external driver, which keeps its default workspace.
+            "/sandbox"
+        } else {
+            let config = std::env::var_os("OPENSHELL_E2E_GATEWAY_CONFIG")
+                .expect("load the VM e2e gateway config path");
+            let mut config = OpenOptions::new()
+                .append(true)
+                .open(config)
+                .expect("open the VM e2e gateway config");
+            writeln!(config, "workspace_root = \"{CUSTOM_WORKSPACE_ROOT}\"")
+                .expect("configure the custom workspace in the last TOML table");
+            gateway.stop().expect("stop the default e2e gateway");
+            gateway
+                .start()
+                .expect("start the e2e gateway with a custom workspace");
+            CUSTOM_WORKSPACE_ROOT
+        };
+
     wait_for_healthy(Duration::from_secs(30))
         .await
         .expect("gateway should start healthy");
 
-    // The gateway restart terminates the VM process before re-adopting its
-    // overlay. Flush the marker before reporting readiness so the assertion
-    // verifies durable overlay state rather than guest page-cache timing.
-    let script = format!(
-        "echo before-restart > {START_FILE}; sync; echo {READY_MARKER}; while true; do sleep 1; done"
-    );
-    let mut sandbox = SandboxGuard::create_keep(&["sh", "-lc", &script], READY_MARKER)
-        .await
-        .expect("create long-running VM sandbox");
+    let main_script = format!("{CHECK_WORKSPACE}echo {READY_MARKER}; exec sleep infinity");
+    let mut sandbox = SandboxGuard::create_keep(
+        &["sh", "-c", &main_script, "sh", workspace_root],
+        READY_MARKER,
+    )
+    .await
+    .expect("start the VM main process in the expected workspace");
 
+    // Write from the default exec directory and flush the overlay before
+    // shutdown. The restarted main process cannot recreate this marker.
+    let write_script = format!("{CHECK_WORKSPACE}printf 'before-restart\n' > {STATE_FILE}; sync");
+    sandbox
+        .exec(&["sh", "-c", &write_script, "sh", workspace_root])
+        .await
+        .expect("write VM state in the workspace");
+    let read_script = format!("{CHECK_WORKSPACE}cat \"$1/{STATE_FILE}\"");
+    let read_state = ["sh", "-c", &read_script, "sh", workspace_root];
     let before_restart = sandbox
-        .exec(&["cat", START_FILE])
+        .exec(&read_state)
         .await
         .expect("read VM sandbox state before restart");
     assert!(
@@ -153,7 +197,7 @@ async fn vm_gateway_restart_preserves_running_and_stopped_intent() {
 
     wait_for_sandbox_exec_contains(
         &sandbox.name,
-        &["cat", START_FILE],
+        &read_state,
         "before-restart",
         Duration::from_mins(4),
     )

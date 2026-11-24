@@ -430,6 +430,7 @@ fi
 
 export OPENSHELL_E2E_DRIVER="vm"
 export OPENSHELL_E2E_VM_STATE_DIR="${RUN_STATE_DIR}"
+export OPENSHELL_E2E_GATEWAY_CONFIG="${GATEWAY_CONFIG}"
 if [ "${ADDITIONAL_CA_MODE}" = "1" ]; then
   additional_ca_artifact_dir="${XDG_STATE_HOME}/openshell/network-supervisor"
   additional_ca_artifacts=("${additional_ca_artifact_dir}"/additional-ca-*.crt)
@@ -449,7 +450,6 @@ if [ "${ADDITIONAL_CA_MODE}" = "1" ]; then
       ;;
   esac
   export OPENSHELL_E2E_ADDITIONAL_CA_ARTIFACT="${artifact_path}"
-  export OPENSHELL_E2E_GATEWAY_CONFIG="${GATEWAY_CONFIG}"
 fi
 e2e_export_gateway_restart_metadata \
   "${GATEWAY_BIN}" \
@@ -497,6 +497,7 @@ else
   run_e2e_test host_gateway_alias
   run_e2e_test vm_overlay
   run_e2e_test vm_bind_mount
-  run_e2e_test vm_gateway_start
   run_e2e_test vm_corporate_proxy
+  # The restart test configures a custom workspace on the managed gateway.
+  run_e2e_test vm_gateway_start
 fi

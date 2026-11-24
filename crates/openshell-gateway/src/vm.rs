@@ -27,6 +27,7 @@
 
 #[cfg(unix)]
 use hyper_util::rt::TokioIo;
+use openshell_core::driver_mounts::{DEFAULT_WORKSPACE_ROOT, VmWorkspaceMode};
 #[cfg(unix)]
 use openshell_core::proto::compute::v1::{
     GetCapabilitiesRequest, compute_driver_client::ComputeDriverClient,
@@ -59,14 +60,6 @@ use tower::service_fn;
 const DRIVER_BIN_NAME: &str = "openshell-driver-vm";
 const COMPUTE_DRIVER_SOCKET_RUN_DIR: &str = "run";
 const COMPUTE_DRIVER_SOCKET_NAME: &str = "compute-driver.sock";
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum VmWorkspaceMode {
-    #[default]
-    Managed,
-    Image,
-}
 
 /// Configuration for launching and talking to the VM compute driver.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -271,7 +264,7 @@ impl Default for VmComputeConfig {
             sandbox_uid: None,
             sandbox_gid: None,
             workspace_mode: VmWorkspaceMode::default(),
-            workspace_root: openshell_core::driver_mounts::DEFAULT_WORKSPACE_ROOT.to_string(),
+            workspace_root: DEFAULT_WORKSPACE_ROOT.to_string(),
             rootfs_tar_staging_dir: None,
             rootfs_tar_max_bytes: None,
             guest_tls_ca: None,
@@ -597,12 +590,19 @@ pub async fn spawn(
         .arg("--overlay-disk-mib")
         .arg(vm_config.overlay_disk_mib.to_string());
     append_vm_identity_args(&mut command, vm_config);
-    if vm_config.workspace_mode == VmWorkspaceMode::Image {
-        command.arg("--workspace-mode").arg("image");
-    } else if vm_config.workspace_root != openshell_core::driver_mounts::DEFAULT_WORKSPACE_ROOT {
-        command
-            .arg("--workspace-root")
-            .arg(&vm_config.workspace_root);
+    match vm_config.workspace_mode {
+        VmWorkspaceMode::Managed => {
+            if vm_config.workspace_root != DEFAULT_WORKSPACE_ROOT {
+                command
+                    .arg("--workspace-root")
+                    .arg(&vm_config.workspace_root);
+            }
+        }
+        VmWorkspaceMode::Image => {
+            command
+                .arg("--workspace-mode")
+                .arg(VmWorkspaceMode::Image.as_str());
+        }
     }
     append_vm_rootfs_tar_args(&mut command, vm_config);
     if let Some(tls) = guest_tls_paths {
