@@ -723,7 +723,8 @@ enum Commands {
         host_key: Option<HostKeyExpectation>,
 
         /// Known-hosts file in which the verified host key is pinned for `ssh`.
-        /// Without it the host key is not verified.
+        /// Without it the host key is not verified, and the connection is
+        /// refused by default.
         #[arg(long)]
         known_hosts: Option<PathBuf>,
     },

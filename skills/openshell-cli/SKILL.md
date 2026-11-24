@@ -584,10 +584,11 @@ for verification behavior and release compatibility.
 
 The CLI, the TUI, and generated SSH config entries verify the host key against
 that fingerprint on every SSH connection they open, and refuse a different key
-with `SSH host key mismatch`. A `NOT verified` warning means the gateway
-published no fingerprint, or the SSH config entry predates host-key
-verification; the warning prints its fix. Set
-`OPENSHELL_SSH_REQUIRE_HOST_KEY=1` to refuse such connections instead.
+with `SSH host key mismatch`. They also refuse a connection they cannot
+verify: the gateway published no fingerprint, or the SSH config entry predates
+host-key verification. The output prints the fix. Set
+`OPENSHELL_SSH_REQUIRE_HOST_KEY=0` to connect anyway, with a `NOT verified`
+warning.
 
 For an infrastructure `Error` on a backend that supports restarting stopped sandboxes, fix the reported cause, run `sandbox stop`, and wait for it to succeed before running `sandbox start`. This retains the sandbox and persistent workspace but cannot recover deleted resources or storage. For a provisioning timeout, wait for cleanup to finish, then run `sandbox start` directly.
 

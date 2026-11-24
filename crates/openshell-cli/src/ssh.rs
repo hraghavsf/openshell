@@ -1808,6 +1808,10 @@ fn sync_error_is_retryable(error: &Report) -> bool {
         return error.is_retryable();
     }
     let message = format!("{error:?}").to_ascii_lowercase();
+    // A host key refusal names the sandbox, which may hold a word listed below.
+    if message.contains("ssh refused:") {
+        return false;
+    }
     [
         "broken pipe",
         "connection",
@@ -2170,7 +2174,8 @@ fn grpc_server_from_ssh_gateway_url(gateway_url: &str) -> Result<String> {
 ///
 /// `known_hosts` is the pin file the config entry also names as its
 /// `UserKnownHostsFile`. An entry without it predates host-key verification
-/// and tells `ssh` to accept any host key: it keeps working, with a warning.
+/// and tells `ssh` to accept any host key: it is refused, unless the user
+/// lets unverified connections go ahead.
 /// `gateway_name` is the gateway the entry names, when it names one.
 pub async fn sandbox_ssh_proxy_by_name(
     server: &str,
@@ -2180,6 +2185,13 @@ pub async fn sandbox_ssh_proxy_by_name(
     workspace: &str,
     known_hosts: Option<PathBuf>,
 ) -> Result<()> {
+    if known_hosts.is_none() {
+        eprintln!(
+            "{}",
+            stale_ssh_config_warning(gateway_name, workspace, name)
+        );
+        permit_unverified().into_diagnostic()?;
+    }
     let session = create_ssh_session(server, name, tls, workspace, None).await?;
     let gate = if let Some(known_hosts) = known_hosts {
         let expectation =
@@ -2192,11 +2204,6 @@ pub async fn sandbox_ssh_proxy_by_name(
         }
         Some(host_key.into_gate())
     } else {
-        eprintln!(
-            "{}",
-            stale_ssh_config_warning(gateway_name, workspace, name)
-        );
-        permit_unverified().into_diagnostic()?;
         None
     };
     let server = grpc_server_from_ssh_gateway_url(&session.gateway_url)?;
@@ -2362,7 +2369,7 @@ fn replace_earlier_release_entries(contents: &str) -> String {
         .lines()
         .filter_map(|line| line.trim_start().strip_prefix("ProxyCommand "));
     for command in commands {
-        // An entry that cannot be rendered stays, and warns when it is used.
+        // An entry that cannot be rendered stays, and is refused when it is used.
         if let Ok(args) = shell_words::split(command)
             && let [exe, _, _, gateway, _, name, _, workspace] = args.as_slice()
             && let Ok(entry) = render_ssh_config(gateway, name, workspace)
@@ -2668,6 +2675,13 @@ mod tests {
     fn sync_error_retry_filter_rejects_validation_failures() {
         let error = miette::miette!("sandbox source path '/etc/passwd' resolves outside /sandbox");
         assert!(!sync_error_is_retryable(&error));
+        let refusal = openshell_core::ssh_host_key::HostKeyError::Unpublished {
+            sandbox: "connection-test".to_string(),
+            workspace: "default".to_string(),
+        };
+        assert!(!sync_error_is_retryable(
+            &Err::<(), _>(refusal).into_diagnostic().unwrap_err()
+        ));
     }
 
     #[test]

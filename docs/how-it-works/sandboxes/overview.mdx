@@ -906,10 +906,9 @@ the same name is checked against its new key. When the SSH server presents a
 different key, they stop before authentication and report
 `SSH host key mismatch`.
 
-They cannot verify a sandbox that has no published fingerprint. They connect
-and print a warning on every such connection. If the gateway predates sandbox
-SSH identities, upgrade it. Otherwise stop and start the sandbox so the
-gateway assigns it a key.
+They cannot verify a sandbox that has no published fingerprint, and refuse to
+connect to it. If the gateway predates sandbox SSH identities, upgrade it.
+Otherwise stop and start the sandbox so the gateway assigns it a key.
 
 Generate an SSH config entry for a sandbox so tools like VS Code Remote-SSH can connect directly:
 
@@ -919,13 +918,13 @@ openshell sandbox ssh-config my-sandbox
 
 Append the output to `~/.ssh/config` or use `--editor` on `sandbox create`/`sandbox connect` for automatic setup.
 
-SSH config entries that an earlier release generated accept any host key.
-They keep working and print a warning on every connection. Using `--editor` on
+SSH config entries that an earlier release generated accept any host key, so
+connections through them are refused. Using `--editor` on
 `sandbox create` or `sandbox connect` replaces that sandbox's entry, and every
 other `openshell-<sandbox>.<workspace>` entry in the OpenShell-managed SSH
 include file (`~/.config/openshell/ssh_config`) that you did not edit.
 
-To repair an entry that still prints the warning:
+To repair an entry that is still refused:
 
 - For an entry you edited, use `--editor` on `sandbox connect` for that
   sandbox, then add your options to the new entry.
@@ -940,11 +939,11 @@ changed that path, change it again. After a downgrade, replaced entries stop
 connecting, because earlier releases do not accept `--known-hosts`. Use
 `--editor` on `sandbox connect` with the downgraded CLI for each sandbox.
 
-Unverified connections go ahead by default. Set
-`OPENSHELL_SSH_REQUIRE_HOST_KEY=1` to refuse every unverified connection, to a
-sandbox with no published fingerprint or through such an entry, instead of
-connecting with a warning. Any value other than `0`, `false`, `no`, `n`, or
-`off` refuses them.
+To connect without verification, to a sandbox with no published fingerprint
+or through such an entry, set `OPENSHELL_SSH_REQUIRE_HOST_KEY` to `0`, `false`,
+`no`, `n`, or `off`. The connection then goes ahead and prints a warning. Set
+it in the environment of the program that runs `ssh`: the shell that runs
+`openshell`, or the editor.
 
 ## Transfer Files
 

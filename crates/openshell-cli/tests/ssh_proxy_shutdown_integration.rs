@@ -75,6 +75,8 @@ async fn proxy_exits_with_stdin_open(relay_status: tonic::Status) {
         ])
         .env("XDG_CONFIG_HOME", config.path())
         .env("OPENSHELL_TELEMETRY_ENABLED", "false")
+        // Started without `--host-key`, the proxy verifies no host key.
+        .env("OPENSHELL_SSH_REQUIRE_HOST_KEY", "0")
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())

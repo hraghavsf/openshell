@@ -1232,8 +1232,8 @@ use openshell_core::forward::{
 use openshell_core::ssh_host_key::{HostKeyCheck, HostKeyError, SandboxSshTarget};
 
 /// Decide how the sandbox's SSH host key is checked and build the
-/// `ProxyCommand` that enforces it. The warning is present when the key cannot
-/// be verified.
+/// `ProxyCommand` that enforces it. The warning is present when the user lets
+/// a connection whose key cannot be verified go ahead.
 fn sandbox_proxy_for_session(
     session: &openshell_core::proto::CreateSshSessionResponse,
     exe: &std::path::Path,

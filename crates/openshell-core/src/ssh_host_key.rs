@@ -24,8 +24,8 @@ use crate::forward::shell_escape;
 use crate::proto::CreateSshSessionResponse;
 use crate::settings::parse_bool_like;
 
-/// Set to refuse every SSH connection whose host key is not verified. Unset,
-/// such a connection goes ahead with a warning.
+/// An SSH connection whose host key is not verified is refused. Set to a value
+/// that reads as "no", such a connection goes ahead with a warning.
 pub const REQUIRE_HOST_KEY_ENV: &str = "OPENSHELL_SSH_REQUIRE_HOST_KEY";
 const FINGERPRINT_PREFIX: &str = "SHA256:";
 const UNVERIFIED: &str = "unverified";
@@ -129,16 +129,14 @@ impl HostKeyExpectation {
     }
 }
 
-/// Whether the user set [`REQUIRE_HOST_KEY_ENV`]. Only a value that reads as
-/// "no" turns it back off.
+/// Whether an unverified connection is refused. Only a
+/// [`REQUIRE_HOST_KEY_ENV`] value that reads as "no" lets it go ahead.
 fn host_key_required() -> bool {
     requires_host_key(std::env::var_os(REQUIRE_HOST_KEY_ENV).as_deref())
 }
 
 fn requires_host_key(value: Option<&OsStr>) -> bool {
-    value.is_some_and(|value| {
-        !value.is_empty() && value.to_str().and_then(parse_bool_like) != Some(false)
-    })
+    value.and_then(OsStr::to_str).and_then(parse_bool_like) != Some(false)
 }
 
 /// For a caller that just warned that nothing verifies the host key of its
@@ -172,13 +170,14 @@ pub enum HostKeyError {
         presented: HostKeyFingerprint,
     },
     #[error(
-        "SSH connection to sandbox '{sandbox}' (workspace '{workspace}') refused: {} is set and the gateway published no host key fingerprint.\n\
-         Upgrade a gateway that predates sandbox SSH identities; otherwise stop and start the sandbox.",
+        "SSH refused: the gateway published no host key fingerprint for sandbox '{sandbox}' (workspace '{workspace}').\n\
+         Upgrade a gateway that predates sandbox SSH identities; otherwise stop and start the sandbox.\n\
+         Set {}=0 to connect without verifying the host key.",
         REQUIRE_HOST_KEY_ENV
     )]
     Unpublished { sandbox: String, workspace: String },
     #[error(
-        "the SSH connection is refused because {} is set and its host key is not verified",
+        "the SSH connection is refused because its host key is not verified. Set {}=0 to connect anyway.",
         REQUIRE_HOST_KEY_ENV
     )]
     Required,
@@ -418,11 +417,19 @@ impl HostKeyCheck {
         expectation: HostKeyExpectation,
         pin: KnownHostsPin,
     ) -> Result<Self, HostKeyError> {
+        Self::new(expectation, pin, host_key_required())
+    }
+
+    fn new(
+        expectation: HostKeyExpectation,
+        pin: KnownHostsPin,
+        refuse_unverified: bool,
+    ) -> Result<Self, HostKeyError> {
         pin.forget_unless(match &expectation {
             HostKeyExpectation::Fingerprint(fingerprint) => Some(fingerprint),
             HostKeyExpectation::AcceptAny => None,
         })?;
-        if matches!(expectation, HostKeyExpectation::AcceptAny) && host_key_required() {
+        if matches!(expectation, HostKeyExpectation::AcceptAny) && refuse_unverified {
             return Err(HostKeyError::Unpublished {
                 sandbox: pin.sandbox,
                 workspace: pin.workspace,
@@ -674,8 +681,12 @@ mod tests {
     }
 
     fn with_config_dir(assertions: impl FnOnce(&Path)) {
+        with_config_dir_in(Environment::new(), assertions);
+    }
+
+    fn with_config_dir_in(environment: Environment, assertions: impl FnOnce(&Path)) {
         let config_home = fixture_dir().unwrap();
-        Environment::new()
+        environment
             .set("XDG_CONFIG_HOME", config_home.path())
             .run(|| assertions(&config_home.path().join("openshell")));
     }
@@ -750,8 +761,9 @@ mod tests {
         ]
     }
 
+    /// The gate of a user who lets unverified connections go ahead.
     fn gate_in(config_dir: &Path, expectation: &str) -> HostKeyGate {
-        HostKeyCheck::for_relay(expectation.parse().unwrap(), pin_in(config_dir))
+        HostKeyCheck::new(expectation.parse().unwrap(), pin_in(config_dir), false)
             .unwrap()
             .into_gate()
     }
@@ -976,8 +988,8 @@ mod tests {
     #[test]
     fn host_key_is_required_by_any_value_but_a_no() {
         for (value, required) in [
-            (None, false),
-            (Some(""), false),
+            (None, true),
+            (Some(""), true),
             (Some("0"), false),
             (Some("False"), false),
             (Some("1"), true),
@@ -1018,7 +1030,21 @@ mod tests {
 
     #[test]
     fn check_for_session_never_trusts_a_cached_pin_when_unverified() {
-        with_config_dir(|config_dir| {
+        let by_default = Environment::new().remove(REQUIRE_HOST_KEY_ENV);
+        with_config_dir_in(by_default, |config_dir| {
+            let pin = pin_in(config_dir);
+            pin.store(&ed25519_blob(KEY_A)).unwrap();
+
+            let refusal = HostKeyCheck::for_session(&published(""), &TARGET).unwrap_err();
+
+            assert!(
+                matches!(refusal, HostKeyError::Unpublished { .. }),
+                "{refusal}"
+            );
+            assert_eq!(fs::read_to_string(pin.path()).unwrap(), PIN_HEADER);
+        });
+        let allowed = Environment::new().set(REQUIRE_HOST_KEY_ENV, "0");
+        with_config_dir_in(allowed, |config_dir| {
             let pin = pin_in(config_dir);
             pin.store(&ed25519_blob(KEY_A)).unwrap();
 

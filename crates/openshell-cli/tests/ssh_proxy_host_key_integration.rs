@@ -191,17 +191,17 @@ fn old_name_mode(gateway: SocketAddr) -> String {
     format!("ssh-proxy --server http://{gateway} --name {SANDBOX} --workspace {WORKSPACE}")
 }
 
-/// Runs `command` to completion. `require_host_key` is whether the user set
-/// `OPENSHELL_SSH_REQUIRE_HOST_KEY`.
+/// Runs `command` to completion. Without `require_host_key`, the user set
+/// `OPENSHELL_SSH_REQUIRE_HOST_KEY=0`.
 async fn finished(
     mut command: tokio::process::Command,
     config: &Path,
     require_host_key: bool,
 ) -> Output {
     if require_host_key {
-        command.env(REQUIRE_HOST_KEY_ENV, "1");
-    } else {
         command.env_remove(REQUIRE_HOST_KEY_ENV);
+    } else {
+        command.env(REQUIRE_HOST_KEY_ENV, "0");
     }
     let run = command
         .env("XDG_CONFIG_HOME", config)
@@ -296,7 +296,7 @@ async fn name_mode_proxy_withholds_a_key_the_gateway_did_not_publish() {
 
 /// A gateway that predates sandbox SSH identities publishes nothing.
 #[tokio::test]
-async fn name_mode_proxy_warns_and_relays_when_the_gateway_published_no_key() {
+async fn name_mode_proxy_refuses_a_sandbox_with_no_published_key_unless_allowed() {
     let key = host_key(1);
     let transcript = handshake(&key).concat();
     let gateway = Gateway {
@@ -334,9 +334,10 @@ async fn name_mode_proxy_warns_and_relays_when_the_gateway_published_no_key() {
 }
 
 /// An `ssh` started by a client or a config entry from before host-key
-/// verification accepts any key. It keeps working, and is told so.
+/// verification accepts any key. It is refused, unless the user lets
+/// unverified connections go ahead.
 #[tokio::test]
-async fn proxy_warns_and_relays_for_a_caller_that_predates_host_key_verification() {
+async fn proxy_refuses_a_caller_that_predates_host_key_verification_unless_allowed() {
     let transcript = handshake(&host_key(2)).concat();
     let gateway = Gateway {
         published: fingerprint(&host_key(1)),
@@ -482,12 +483,11 @@ mod openssh {
             .args(overrides.iter().flat_map(|option| ["-o", option]))
             .args(sandbox_ssh_args(&proxy_command, "ERROR"))
             .args(["sandbox", COMMAND]);
-        finished(ssh, config, false).await
+        finished(ssh, config, true).await
     }
 
     /// Runs [`COMMAND`] through the config entry `sandbox ssh-config`
-    /// prints, with no other configuration and no options of its own, for
-    /// a user who requires a verified host key.
+    /// prints, with no other configuration and no options of its own.
     async fn ssh_through_config_entry(gateway: SocketAddr, config: &Path) -> Output {
         let gateway_dir = config.join("openshell/gateways").join(GATEWAY);
         std::fs::create_dir_all(&gateway_dir).unwrap();
@@ -519,7 +519,7 @@ mod openssh {
         finished(ssh, config, true).await
     }
 
-    /// The proxy accepts and forwards any key here, so the refusal is `ssh`'s
+    /// The proxy forwards the published key here, so the refusal is `ssh`'s
     /// own strict check against a file the proxy does not write.
     #[tokio::test]
     async fn ssh_refuses_a_key_missing_from_its_own_known_hosts_file() {
@@ -533,7 +533,7 @@ mod openssh {
 
         let ssh = ssh_as_client(
             gateway,
-            "unverified",
+            &fingerprint(&key),
             &proxy_pin,
             scratch.path(),
             &[format!("UserKnownHostsFile=\"{}\"", ssh_pin.display())],
