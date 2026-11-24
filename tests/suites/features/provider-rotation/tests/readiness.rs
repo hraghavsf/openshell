@@ -22,7 +22,8 @@ use provider_rotation::{
     probe, probe_disallowed_binary,
 };
 use serde_json::{Value, json};
-use testkit::{CliChild, Context, Error, PYTHON_BINARIES, Result, Sandbox};
+use testkit::policy::{Access, Endpoint as _};
+use testkit::{CliChild, Context, Error, PYTHON_BINARIES, Profile, Result, Sandbox};
 
 fn main() -> std::process::ExitCode {
     testkit::main()
@@ -106,10 +107,8 @@ async fn acknowledged_changes_reach_fresh_clients_and_detach_revokes_retained_re
     let keys = keys();
     let backends = Backends::start(Credential::Bearer, &keys).await?;
     let provider = cx.name("ready");
-    let provider_type = cx
-        .import_profile(&profile(&provider, backends.port()))
-        .await?;
-    cx.create_provider(&provider, &provider_type, &[(TOKEN_ENV, &keys[0])])
+    let profile = profile(&provider, backends.port())?;
+    cx.install_provider(&provider, &profile, &[(TOKEN_ENV, &keys[0])])
         .await?;
     let sandbox = cx
         .sandbox("ready")
@@ -282,16 +281,21 @@ async fn acknowledged_changes_reach_fresh_clients_and_detach_revokes_retained_re
 }
 
 /// A profile with one bearer credential bound to the server on `port`.
-fn profile(id: &str, port: u16) -> String {
-    json!({
-        "id": id, "display_name": "Provider readiness test", "category": "other",
-        "credentials": [{"name": "synthetic", "env_vars": [TOKEN_ENV], "required": true,
-            "auth_style": "bearer", "header_name": "authorization"}],
-        "endpoints": [{"host": TEST_HOST, "port": port, "path": "/v1/**", "protocol": "rest",
-            "access": "full", "enforcement": "enforce"}],
-        "binaries": PYTHON_BINARIES,
-    })
-    .to_string()
+fn profile(id: &str, port: u16) -> Result<String> {
+    Profile::new(id)
+        .display_name("Provider readiness test")
+        .credential(
+            testkit::Credential::new("synthetic")
+                .env_var(TOKEN_ENV)
+                .required()
+                .auth_style("bearer")
+                .header_name("authorization"),
+        )
+        .endpoint(TEST_HOST, port, |ep| {
+            ep.rest(Access::Full).enforce().path("/v1/**");
+        })
+        .binaries(PYTHON_BINARIES.iter().copied())
+        .to_yaml()
 }
 
 fn pid(response: &Value) -> Result<u64> {

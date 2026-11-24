@@ -11,9 +11,13 @@
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD as BASE64;
 use host_server_support::{HttpRecorder, Request, Response, TEST_HOST};
 use serde_json::json;
-use testkit::{Context, PYTHON_BINARIES, Poll, Result, Sandbox, policy, poll_until};
+use testkit::policy::{self, Access, Endpoint as _};
+use testkit::sdk::raw::proto;
+use testkit::{Context, Credential, PYTHON_BINARIES, Poll, Profile, Result, Sandbox, poll_until};
 
 fn main() -> std::process::ExitCode {
     testkit::main()
@@ -49,11 +53,12 @@ done"#,
     )
 }
 
-/// A shell command that requests `resource_url` with the credential from the
-/// environment as a bearer token, and fails unless the resource accepts it.
+/// A shell command that requests `resource_url` twice with the credential
+/// from the environment, as a bearer token and as the password of HTTP Basic
+/// `x-access-token`, and fails unless the resource accepts both.
 fn probe(resource_url: &str) -> String {
     format!(
-        r#"python3 -c 'import os, urllib.request; urllib.request.urlopen(urllib.request.Request("{resource_url}", headers={{"Authorization": "Bearer " + os.environ["{TOKEN_ENV}"]}}), timeout=5).read()'"#
+        r#"python3 -c 'import os, base64, urllib.request; token = os.environ["{TOKEN_ENV}"]; auths = ["Bearer " + token, "Basic " + base64.b64encode(("x-access-token:" + token).encode()).decode()]; [urllib.request.urlopen(urllib.request.Request("{resource_url}", headers={{"Authorization": auth}}), timeout=5).read() for auth in auths]'"#
     )
 }
 
@@ -68,9 +73,8 @@ async fn long_running_process_survives_rotations_and_reconfigure_revokes(
 ) -> testkit::Result {
     let issuer = Issuer::start().await?;
     let provider = cx.name("refresh");
-    let profile = profile(&provider, issuer.port());
-    let provider_type = cx.import_profile(&profile).await?;
-    cx.create_provider(&provider, &provider_type, &[(TOKEN_ENV, BOOTSTRAP_TOKEN)])
+    let profile = profile(&provider, issuer.port()).to_yaml()?;
+    cx.install_provider(&provider, &profile, &[(TOKEN_ENV, BOOTSTRAP_TOKEN)])
         .await?;
     let refresh = cx.provider_refresh(&provider, TOKEN_ENV);
     let configure = async || {
@@ -90,7 +94,7 @@ async fn long_running_process_survives_rotations_and_reconfigure_revokes(
         .sandbox("rfh")
         .image(testkit::python_image())
         .providers([provider.as_str()])
-        .policy(probe_policy(issuer.port())?)
+        .policy(probe_policy(issuer.port()))
         .command(["sh", "-c", &main_process(&resource_url)])
         .create_ready()
         .await?;
@@ -104,14 +108,14 @@ async fn long_running_process_survives_rotations_and_reconfigure_revokes(
 
     for _ in 0..ROTATIONS {
         refresh.rotate().await?.success()?;
+        wait_for_probe(
+            &sandbox,
+            "ok",
+            "the long-running process to use the latest rotated token",
+        )
+        .await
+        .map_err(|error| error.context(format!("issuer saw {}", issuer.summary())))?;
     }
-    wait_for_probe(
-        &sandbox,
-        "ok",
-        "the long-running process to use the latest rotated token",
-    )
-    .await
-    .map_err(|error| error.context(format!("issuer saw {}", issuer.summary())))?;
 
     configure().await?;
     wait_for_probe(
@@ -121,10 +125,31 @@ async fn long_running_process_survives_rotations_and_reconfigure_revokes(
     )
     .await?;
 
-    sandbox
-        .exec(["sh", "-c", &probe(&resource_url)])
-        .await?
-        .success()?;
+    refresh.rotate().await?.success()?;
+    poll_until(
+        "a new process to reach the resource after reconfiguring",
+        PROBE_TIMEOUT,
+        Duration::from_millis(500),
+        async || {
+            let fresh = sandbox.exec(["sh", "-c", &probe(&resource_url)]).await?;
+            Ok(if fresh.exit_code == 0 {
+                Poll::Ready(())
+            } else {
+                Poll::Pending(format!(
+                    "the probe exited {}: {}",
+                    fresh.exit_code,
+                    fresh.stderr.trim()
+                ))
+            })
+        },
+    )
+    .await
+    .map_err(|error| error.context(format!("issuer saw {}", issuer.summary())))?;
+    let old = trigger_probe(&sandbox).await?;
+    testkit::ensure!(
+        old == "failed",
+        "the long-running process's revoked handle worked again after a new token was issued: {old:?}"
+    );
     Ok(())
 }
 
@@ -164,7 +189,8 @@ async fn wait_for_probe(sandbox: &Sandbox, expected: &str, what: &str) -> Result
 
 /// An OAuth issuer and the resource it guards. Each `POST /token` issues a
 /// new token and invalidates the last. `GET /probe` answers `204` to the
-/// current token and `401` to anything else.
+/// current token, as a bearer token or as the password of HTTP Basic
+/// `x-access-token`, and `401` to anything else.
 struct Issuer {
     server: HttpRecorder,
 }
@@ -185,8 +211,14 @@ impl Issuer {
                     }))
                 }
                 ("GET", "/probe")
-                    if request.header("authorization").as_deref()
-                        == Some(&format!("Bearer {}", state.1)) =>
+                    if request.header("authorization").is_some_and(|auth| {
+                        auth == format!("Bearer {}", state.1)
+                            || auth
+                                == format!(
+                                    "Basic {}",
+                                    BASE64.encode(format!("x-access-token:{}", state.1))
+                                )
+                    }) =>
                 {
                     Response::new(204)
                 }
@@ -215,49 +247,52 @@ impl Issuer {
 
 /// A profile whose credential refreshes with OAuth client credentials from
 /// the issuer on `port`, and is bound to the resource on the same port.
-fn profile(id: &str, port: u16) -> String {
-    let binaries = PYTHON_BINARIES
-        .iter()
-        .map(|binary| format!("\"{binary}\""))
-        .collect::<Vec<_>>()
-        .join(", ");
-    format!(
-        "id: {id}
-display_name: Provider refresh handle test
-category: other
-credentials:
-  - name: access_token
-    env_vars: [{TOKEN_ENV}]
-    required: true
-    auth_style: bearer
-    header_name: authorization
-    refresh:
-      strategy: oauth2_client_credentials
-      token_url: http://127.0.0.1:{port}/token
-      refresh_before_seconds: 30
-      max_lifetime_seconds: 300
-      material:
-        - name: client_id
-          required: true
-        - name: client_secret
-          required: true
-          secret: true
-endpoints:
-  - {{host: {TEST_HOST}, port: {port}, path: /probe, protocol: rest, access: full, enforcement: enforce}}
-binaries: [{binaries}]
-"
-    )
+fn profile(id: &str, port: u16) -> Profile {
+    let material = |name: &str, secret: bool| proto::ProviderCredentialRefreshMaterial {
+        name: name.to_string(),
+        required: true,
+        secret,
+        ..proto::ProviderCredentialRefreshMaterial::default()
+    };
+    let seconds = |seconds| Some(prost_types::Duration { seconds, nanos: 0 });
+    Profile::new(id)
+        .display_name("Provider refresh handle test")
+        .credential(
+            Credential::new("access_token")
+                .env_var(TOKEN_ENV)
+                .required()
+                .auth_style("bearer")
+                .header_name("authorization")
+                .refresh(proto::ProviderCredentialRefresh {
+                    strategy: proto::ProviderCredentialRefreshStrategy::Oauth2ClientCredentials
+                        as i32,
+                    token_url: format!("http://127.0.0.1:{port}/token"),
+                    refresh_before: seconds(30),
+                    max_lifetime: seconds(300),
+                    material: vec![
+                        material("client_id", false),
+                        material("client_secret", true),
+                    ],
+                    ..proto::ProviderCredentialRefresh::default()
+                }),
+        )
+        .endpoint(TEST_HOST, port, |ep| {
+            ep.rest(Access::Full).enforce().path("/probe");
+        })
+        .binaries(PYTHON_BINARIES.iter().copied())
 }
 
-fn probe_policy(port: u16) -> Result<testkit::sdk::raw::proto::SandboxPolicy> {
-    policy::base_with(&format!(
-        "network_policies:
-  refresh_probe:
-    name: refresh_probe
-    endpoints:
-      - {{host: {TEST_HOST}, port: {port}, path: /probe, protocol: rest, access: full, enforcement: enforce}}
-    binaries: {binaries}
-",
-        binaries = policy::binaries_yaml(PYTHON_BINARIES),
-    ))
+fn probe_policy(port: u16) -> proto::SandboxPolicy {
+    let mut policy = policy::base();
+    policy::allow(
+        &mut policy,
+        "refresh_probe",
+        TEST_HOST,
+        port,
+        PYTHON_BINARIES,
+    )
+    .rest(Access::Full)
+    .enforce()
+    .path("/probe");
+    policy
 }

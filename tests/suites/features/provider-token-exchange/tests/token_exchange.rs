@@ -70,17 +70,9 @@ async fn independent_grants_across_sandboxes(cx: &mut Context) -> testkit::Resul
     let mut sandboxes = Vec::new();
     for instance in ["a", "b"] {
         let provider = cx.name(&format!("grants-{instance}"));
-        let profile_type = cx
-            .import_profile(&grants_profile(
-                &provider,
-                token_port,
-                identity_port,
-                target_port,
-                instance,
-            ))
-            .await?;
+        let profile = grants_profile(&provider, token_port, identity_port, target_port, instance);
         let subject = format!("{USER_SUBJECT_TOKEN}-{instance}");
-        cx.create_provider(&provider, &profile_type, &[(SUBJECT_TOKEN_ENV, &subject)])
+        cx.install_provider(&provider, &profile, &[(SUBJECT_TOKEN_ENV, &subject)])
             .await?;
         sandboxes.push(
             cx.sandbox(&format!("pte{instance}"))
@@ -175,15 +167,10 @@ async fn routes_recover_and_select_a_b_a_on_one_connection(cx: &mut Context) -> 
     let mut providers = Vec::new();
     for route in ["a", "b"] {
         let provider = cx.name(&format!("route-{route}"));
-        let profile_type = cx
-            .import_profile(&route_profile(&provider, token_port, target_port, route))
+        let profile = route_profile(&provider, token_port, target_port, route);
+        let stored = format!("stored-{route}");
+        cx.install_provider(&provider, &profile, &[(SUBJECT_TOKEN_ENV, &stored)])
             .await?;
-        cx.create_provider(
-            &provider,
-            &profile_type,
-            &[(SUBJECT_TOKEN_ENV, &format!("stored-{route}"))],
-        )
-        .await?;
         providers.push(provider);
     }
     let sandbox = cx

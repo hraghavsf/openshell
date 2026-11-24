@@ -138,10 +138,8 @@ async fn assertion_rotation(cx: &Context, stable: bool) -> Result {
     let backends = Backends::start(Credential::Assertion, &keys).await?;
     let suffix = if stable { "stbl" } else { "ordn" };
     let provider = cx.name(suffix);
-    let provider_type = cx
-        .import_profile(&profile(&provider, backends.port(), stable))
-        .await?;
-    cx.create_provider(&provider, &provider_type, &[(TOKEN_ENV, &keys[0])])
+    let profile = profile(&provider, backends.port(), stable);
+    cx.install_provider(&provider, &profile, &[(TOKEN_ENV, &keys[0])])
         .await?;
     let config = json!({"key": TOKEN_ENV, "header": ASSERTION_HEADER, "payload": tool_call(),
         "host": TEST_HOST, "other_host": backends.other_host(), "port": backends.port(),
