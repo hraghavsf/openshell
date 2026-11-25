@@ -360,6 +360,16 @@ fn run_libkrun_vm(config: &VmLaunchConfig) -> Result<(), String> {
     let env = libkrun_guest_env(config);
     vm.set_exec(&config.exec_path, &config.args, &env)?;
 
+    // What the worker may still touch once it is the VM (see
+    // worker_confinement). The console log must exist before confinement,
+    // because the worker can't create files in the sandbox's state folder.
+    std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&config.console_output)
+        .map_err(|e| format!("create {}: {e}", config.console_output.display()))?;
+    let worker_paths = worker_confinement_paths(config, &runtime_dir);
+
     let pid = unsafe { libc::fork() };
     match pid {
         -1 => Err(format!("fork failed: {}", std::io::Error::last_os_error())),
@@ -376,6 +386,22 @@ fn run_libkrun_vm(config: &VmLaunchConfig) -> Result<(), String> {
             if let Err(err) = procguard::die_with_parent() {
                 eprintln!("libkrun worker: procguard arm failed: {err}");
                 std::process::exit(1);
+            }
+            // Confine the worker before it becomes the VM, so a guest that
+            // escapes into it can't reach the user's files or network.
+            if crate::worker_confinement::disabled() {
+                eprintln!(
+                    "libkrun worker: confinement turned off ({}=off)",
+                    crate::worker_confinement::DISABLE_ENV
+                );
+            } else {
+                match crate::worker_confinement::confine(&worker_paths) {
+                    Ok(status) => eprintln!("libkrun worker: confinement: {status}"),
+                    Err(err) => {
+                        eprintln!("libkrun worker: confinement failed: {err}");
+                        std::process::exit(1);
+                    }
+                }
             }
             let ret = vm.start_enter();
             eprintln!("krun_start_enter failed: {ret}");
@@ -398,6 +424,46 @@ fn run_libkrun_vm(config: &VmLaunchConfig) -> Result<(), String> {
                 Err(format!("VM exited with unexpected wait status {status}"))
             }
         }
+    }
+}
+
+/// The paths the libkrun worker needs once it is the VM: its writable overlay,
+/// console log, control-socket folder and writable shares; read-only, the
+/// cached base and image disks, the runtime libraries and read-only shares.
+fn worker_confinement_paths(
+    config: &VmLaunchConfig,
+    runtime_dir: &Path,
+) -> crate::worker_confinement::WorkerPaths {
+    let socket_dir = config
+        .vsock_port_map
+        .as_ref()
+        .and_then(|port_map| port_map.host_socket.parent().map(Path::to_path_buf));
+    let mut read_write: Vec<PathBuf> = [
+        Some(config.overlay_disk.clone()),
+        Some(config.console_output.clone()),
+        socket_dir,
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    let mut read_only: Vec<PathBuf> = [
+        Some(config.root_disk.clone()),
+        config.image_disk.clone(),
+        Some(runtime_dir.to_path_buf()),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    for mount in &config.mounts {
+        if mount.read_only {
+            read_only.push(mount.host_path.clone());
+        } else {
+            read_write.push(mount.host_path.clone());
+        }
+    }
+    crate::worker_confinement::WorkerPaths {
+        read_write,
+        read_only,
     }
 }
 
