@@ -3721,6 +3721,29 @@ impl VmDriver {
         image_ref: &str,
     ) -> Result<String, Status> {
         let span_status = openshell_otel::ErrorStatusGuard::current();
+        if let Some(rootfs_tar) = bootstrap_rootfs_tar_path(image_ref) {
+            // Identified by its contents, so a changed tar builds a new cached disk.
+            let tar_for_hash = rootfs_tar.clone();
+            let digest =
+                tokio::task::spawn_blocking(move || compute_file_sha256_hex(&tar_for_hash))
+                    .await
+                    .map_err(|err| {
+                        Status::internal(format!("hash bootstrap rootfs tar panicked: {err}"))
+                    })?
+                    .map_err(|err| {
+                        Status::failed_precondition(format!("read bootstrap rootfs tar: {err}"))
+                    })?;
+            let image_identity = format!("rootfs-tar:sha256:{digest}");
+            let result = self
+                .ensure_cached_local_image_rootfs_image(
+                    sandbox_id,
+                    image_ref,
+                    LocalRootfsSource::RootfsTar(&rootfs_tar),
+                    &image_identity,
+                )
+                .await;
+            return span_status.finish(result);
+        }
         if let Some((engine, image_identity)) =
             self.resolve_local_container_image(image_ref).await?
         {
@@ -3728,7 +3751,7 @@ impl VmDriver {
                 .ensure_cached_local_image_rootfs_image(
                     sandbox_id,
                     image_ref,
-                    &engine,
+                    LocalRootfsSource::ContainerEngine(&engine),
                     &image_identity,
                 )
                 .await;
@@ -4017,7 +4040,7 @@ impl VmDriver {
         &self,
         sandbox_id: &str,
         image_ref: &str,
-        docker: &Docker,
+        source: LocalRootfsSource<'_>,
         image_identity: &str,
     ) -> Result<String, Status> {
         let cache_identity = bootstrap_image_cache_identity(image_identity);
@@ -4088,7 +4111,7 @@ impl VmDriver {
             return Ok(cache_identity);
         }
 
-        self.build_cached_local_image_rootfs_image(sandbox_id, docker, image_ref, &cache_identity)
+        self.build_cached_local_image_rootfs_image(sandbox_id, source, image_ref, &cache_identity)
             .await?;
         self.publish_pulled_event(sandbox_id, image_ref, &image_path)
             .await;
@@ -4727,7 +4750,7 @@ impl VmDriver {
     async fn build_cached_local_image_rootfs_image(
         &self,
         sandbox_id: &str,
-        docker: &Docker,
+        source: LocalRootfsSource<'_>,
         image_ref: &str,
         image_identity: &str,
     ) -> Result<(), Status> {
@@ -4770,9 +4793,21 @@ impl VmDriver {
                 ("image_identity".to_string(), image_identity.to_string()),
             ]),
         );
-        if let Err(err) =
-            export_local_image_rootfs_to_path(docker, image_ref, &exported_rootfs).await
-        {
+        let staged = match source {
+            LocalRootfsSource::ContainerEngine(docker) => {
+                export_local_image_rootfs_to_path(docker, image_ref, &exported_rootfs).await
+            }
+            LocalRootfsSource::RootfsTar(path) => tokio::fs::copy(path, &exported_rootfs)
+                .await
+                .map(|_| ())
+                .map_err(|err| {
+                    Status::failed_precondition(format!(
+                        "stage bootstrap rootfs tar {}: {err}",
+                        path.display()
+                    ))
+                }),
+        };
+        if let Err(err) = staged {
             let _ = tokio::fs::remove_dir_all(&staging_dir).await;
             return Err(err);
         }
@@ -6512,6 +6547,25 @@ fn verify_descriptor_digest(path: &Path, expected_digest: &str) -> Result<(), St
             path.display()
         ))
     }
+}
+
+/// Where a locally sourced bootstrap root filesystem comes from.
+#[derive(Clone, Copy)]
+enum LocalRootfsSource<'a> {
+    /// Exported from an image in the local Docker or Podman store.
+    ContainerEngine(&'a Docker),
+    /// A rootfs tar on the gateway host, named directly by `bootstrap_image`.
+    RootfsTar(&'a Path),
+}
+
+/// `bootstrap_image` may name a rootfs tar on the gateway host instead of an
+/// image reference: an absolute path ending in `.tar`. Image references never
+/// start with `/`, so the two can't be confused. This lets an operator supply the
+/// bootstrap disk without a container engine or a registry.
+fn bootstrap_rootfs_tar_path(image_ref: &str) -> Option<PathBuf> {
+    let path = Path::new(image_ref);
+    (path.is_absolute() && path.extension().is_some_and(|ext| ext == "tar"))
+        .then(|| path.to_path_buf())
 }
 
 fn compute_file_sha256_hex(path: &Path) -> Result<String, String> {
@@ -11894,6 +11948,24 @@ mod tests {
             !env.iter()
                 .any(|entry| entry.starts_with("OPENSHELL_VM_PIDS_LIMIT="))
         );
+    }
+
+    #[test]
+    fn bootstrap_rootfs_tar_path_accepts_only_absolute_tar_paths() {
+        assert_eq!(
+            bootstrap_rootfs_tar_path("/opt/tessiv/vm-bootstrap.rootfs.tar"),
+            Some(PathBuf::from("/opt/tessiv/vm-bootstrap.rootfs.tar"))
+        );
+        assert_eq!(bootstrap_rootfs_tar_path("vm-bootstrap.rootfs.tar"), None);
+        assert_eq!(
+            bootstrap_rootfs_tar_path("/opt/tessiv/vm-bootstrap.tar.gz"),
+            None
+        );
+        assert_eq!(
+            bootstrap_rootfs_tar_path("nvcr.io/nvidia/base/ubuntu:24.04"),
+            None
+        );
+        assert_eq!(bootstrap_rootfs_tar_path("tessiv/vm-bootstrap:0.1.0"), None);
     }
 
     #[test]
