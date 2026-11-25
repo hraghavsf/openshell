@@ -205,6 +205,11 @@ struct Args {
     #[arg(long, env = "OPENSHELL_VM_OVERLAY_DISK_MIB", default_value_t = 4096)]
     overlay_disk_mib: u64,
 
+    /// Process limit per sandbox, enforced by a pids cgroup inside the guest.
+    /// Defaults to the Docker driver's default; 0 turns the limit off.
+    #[arg(long, env = "OPENSHELL_VM_SANDBOX_PIDS_LIMIT")]
+    sandbox_pids_limit: Option<i64>,
+
     #[arg(long, env = "OPENSHELL_VM_GPU")]
     gpu: bool,
 
@@ -341,6 +346,15 @@ async fn main() -> Result<()> {
         vcpus: args.vcpus,
         mem_mib: args.mem_mib,
         overlay_disk_mib: args.overlay_disk_mib,
+        sandbox_pids_limit: match args.sandbox_pids_limit {
+            None => openshell_core::config::default_sandbox_pids_limit(),
+            Some(limit) if limit < 0 => {
+                return Err(miette::miette!(
+                    "OPENSHELL_VM_SANDBOX_PIDS_LIMIT must be 0 (no limit) or positive"
+                ));
+            }
+            Some(limit) => std::num::NonZeroI64::new(limit),
+        },
         guest_tls_ca: args.guest_tls_ca.clone(),
         guest_tls_cert: args.guest_tls_cert.clone(),
         guest_tls_key: args.guest_tls_key.clone(),

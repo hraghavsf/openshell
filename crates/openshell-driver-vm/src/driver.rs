@@ -363,6 +363,9 @@ pub struct VmDriverConfig {
     pub vcpus: u8,
     pub mem_mib: u32,
     pub overlay_disk_mib: u64,
+    /// Process limit for each sandbox, enforced by a pids cgroup in the guest.
+    /// Same default as the Docker driver's `sandbox_pids_limit`; `None` means none.
+    pub sandbox_pids_limit: Option<std::num::NonZeroI64>,
     pub guest_tls_ca: Option<PathBuf>,
     pub guest_tls_cert: Option<PathBuf>,
     pub guest_tls_key: Option<PathBuf>,
@@ -436,6 +439,7 @@ impl std::fmt::Debug for VmDriverConfig {
             .field("vcpus", &self.vcpus)
             .field("mem_mib", &self.mem_mib)
             .field("overlay_disk_mib", &self.overlay_disk_mib)
+            .field("sandbox_pids_limit", &self.sandbox_pids_limit)
             .field("guest_tls_ca", &self.guest_tls_ca)
             .field("guest_tls_cert", &self.guest_tls_cert)
             .field("guest_tls_key", &self.guest_tls_key)
@@ -509,6 +513,7 @@ impl Default for VmDriverConfig {
             vcpus: DEFAULT_VCPUS,
             mem_mib: DEFAULT_MEM_MIB,
             overlay_disk_mib: DEFAULT_OVERLAY_DISK_MIB,
+            sandbox_pids_limit: openshell_core::config::default_sandbox_pids_limit(),
             guest_tls_ca: None,
             guest_tls_cert: None,
             guest_tls_key: None,
@@ -6756,6 +6761,10 @@ fn build_guest_environment(sandbox: &Sandbox, config: &VmDriverConfig) -> Vec<St
         openshell_core::sandbox_env::TELEMETRY_ENABLED.to_string(),
         openshell_core::telemetry::enabled_env_value().to_string(),
     );
+    // Guest init turns this into a pids cgroup around the sandbox.
+    if let Some(limit) = config.sandbox_pids_limit {
+        environment.insert("OPENSHELL_VM_PIDS_LIMIT".to_string(), limit.to_string());
+    }
     let mut pairs = environment.into_iter().collect::<Vec<_>>();
     pairs.sort_by(|left, right| left.0.cmp(&right.0));
     pairs
@@ -11858,6 +11867,32 @@ mod tests {
         assert!(
             !env.iter()
                 .any(|entry| entry.starts_with("OPENSHELL_SSH_SOCKET_PATH="))
+        );
+    }
+
+    #[test]
+    fn build_guest_environment_passes_the_pids_limit_to_guest_init() {
+        let sandbox = Sandbox {
+            id: "sandbox-123".to_string(),
+            name: "pids".to_string(),
+            spec: Some(SandboxSpec::default()),
+            ..Default::default()
+        };
+
+        let env = build_guest_environment(&sandbox, &VmDriverConfig::default());
+        assert!(env.contains(&format!(
+            "OPENSHELL_VM_PIDS_LIMIT={}",
+            openshell_core::config::DEFAULT_SANDBOX_PIDS_LIMIT
+        )));
+
+        let unlimited = VmDriverConfig {
+            sandbox_pids_limit: None,
+            ..Default::default()
+        };
+        let env = build_guest_environment(&sandbox, &unlimited);
+        assert!(
+            !env.iter()
+                .any(|entry| entry.starts_with("OPENSHELL_VM_PIDS_LIMIT="))
         );
     }
 

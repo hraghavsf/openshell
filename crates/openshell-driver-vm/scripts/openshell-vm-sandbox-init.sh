@@ -48,6 +48,36 @@ root_path() {
     printf '%s%s\n' "${ROOT_PREFIX:-}" "$path"
 }
 
+# Give the sandbox a process limit, like the Docker driver's pids_limit. The root
+# cgroup can't carry pids.max, so guest init creates a child cgroup, moves itself in
+# before it execs the supervisor (every sandbox process inherits it), and bind-mounts
+# the child over /sys/fs/cgroup, so the supervisor's runtime PID-limit check finds
+# pids.max where it looks. The driver sets OPENSHELL_VM_PIDS_LIMIT; unset means none.
+setup_sandbox_pids_limit() {
+    local limit="${OPENSHELL_VM_PIDS_LIMIT:-}"
+    unset OPENSHELL_VM_PIDS_LIMIT
+    [ -n "$limit" ] || return 0
+    case "$limit" in
+        *[!0-9]*|0) ts "FATAL: invalid OPENSHELL_VM_PIDS_LIMIT '${limit}'"; exit 1 ;;
+    esac
+
+    local cgroot group
+    cgroot="$(root_path /sys/fs/cgroup)"
+    group="${cgroot}/openshell-sandbox"
+    if ! echo "+pids" > "${cgroot}/cgroup.subtree_control"; then
+        ts "FATAL: the guest kernel's pids cgroup controller is unavailable"
+        exit 1
+    fi
+    mkdir -p "$group"
+    echo "$limit" > "${group}/pids.max"
+    echo "$$" > "${group}/cgroup.procs"
+    if ! mount --bind "$group" "$cgroot"; then
+        ts "FATAL: failed to expose the sandbox cgroup at /sys/fs/cgroup"
+        exit 1
+    fi
+    ts "sandbox pids.max=${limit}"
+}
+
 sandbox_owner() {
     sandbox_owner_from_passwd "$(root_path /etc/passwd)"
 }
@@ -653,6 +683,7 @@ run_post_overlay_setup() {
     mount -t tmpfs tmpfs "$(root_path /dev/shm)" 2>/dev/null &
     mount -t cgroup2 cgroup2 "$(root_path /sys/fs/cgroup)" 2>/dev/null &
     wait
+    setup_sandbox_pids_limit
 
     reconcile_sandbox_account
     setup_sandbox_workdir
