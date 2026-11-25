@@ -280,8 +280,18 @@ struct Args {
     vm_mount: Vec<String>,
 }
 
+fn main() -> Result<()> {
+    // The host supervisor's launcher: confine this fresh process and exec the
+    // supervisor. It must run before the async runtime starts any threads, and
+    // before argument parsing, which would read the supervisor's environment.
+    if let Some(code) = openshell_driver_vm::confined_exec_from_args() {
+        std::process::exit(code);
+    }
+    run()
+}
+
 #[tokio::main]
-async fn main() -> Result<()> {
+async fn run() -> Result<()> {
     let args = Args::parse();
     if let Some(request) = args.internal_prepare_image {
         openshell_driver_vm::driver::run_image_preparation_worker(&request)

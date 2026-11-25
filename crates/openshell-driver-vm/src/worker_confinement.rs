@@ -55,7 +55,7 @@ pub fn disabled() -> bool {
 #[cfg(target_os = "linux")]
 pub fn confine(paths: &WorkerPaths) -> Result<String, String> {
     let landlock = linux::restrict_filesystem_and_network(paths)?;
-    linux::install_seccomp_filter()?;
+    linux::install_seccomp_filter(linux::FilterFor::Worker)?;
     Ok(format!("Landlock {landlock}, seccomp filter installed"))
 }
 
@@ -63,7 +63,7 @@ pub fn confine(paths: &WorkerPaths) -> Result<String, String> {
 /// Returns a short status for the log.
 #[cfg(target_os = "macos")]
 pub fn confine(paths: &WorkerPaths) -> Result<String, String> {
-    macos::apply_seatbelt_profile(paths)?;
+    macos::apply(&macos::profile(paths))?;
     Ok("Seatbelt profile applied".to_string())
 }
 
@@ -72,6 +72,138 @@ pub fn confine(paths: &WorkerPaths) -> Result<String, String> {
 #[allow(clippy::unnecessary_wraps)] // Same signature as the Linux version.
 pub fn confine(_paths: &WorkerPaths) -> Result<String, String> {
     Ok("not implemented on this OS".to_string())
+}
+
+// --- The host supervisor ---------------------------------------------------
+//
+// The host supervisor holds the sandbox's credentials and makes every outside
+// connection, so the guest can reach it over its authenticated channel. It
+// needs the network, the system's DNS and TLS configuration, and its own
+// sandbox's state and socket folders. It doesn't need the rest of the user's
+// files: SSH keys, agent sign-ins, other projects, the CLI's gateway
+// certificates, the gateway's own signing key and database, or other
+// sandboxes. Nor does it need to run other programs.
+//
+// The driver launches it through itself in confined-exec mode: a fresh,
+// single-threaded process confines itself, then execs the supervisor. The
+// confinement carries across exec. Doing it in a pre_exec hook of the
+// multi-threaded driver instead would mean allocating after fork.
+
+/// First argument of the driver's confined-exec mode:
+/// `openshell-driver-vm --internal-confined-exec [--read-write PATH]...
+/// [--read-only PATH]... -- PROGRAM [ARGS]...`
+pub const CONFINED_EXEC_FLAG: &str = "--internal-confined-exec";
+
+/// Paths the host supervisor may use.
+#[derive(Debug, Default, Clone)]
+pub struct SupervisorPaths {
+    /// Its sandbox's state folder and socket folder.
+    pub read_write: Vec<PathBuf>,
+    /// The gateway CA and any operator-supplied proxy files.
+    pub read_only: Vec<PathBuf>,
+    /// The supervisor binary, the only program it may run.
+    pub executable: PathBuf,
+}
+
+impl SupervisorPaths {
+    /// Arguments for the driver's confined-exec mode, up to and including the
+    /// program: append the program's own arguments after these.
+    pub fn confined_exec_args(&self) -> Vec<std::ffi::OsString> {
+        let mut args = vec![CONFINED_EXEC_FLAG.into()];
+        for path in &self.read_write {
+            args.push("--read-write".into());
+            args.push(path.clone().into_os_string());
+        }
+        for path in &self.read_only {
+            args.push("--read-only".into());
+            args.push(path.clone().into_os_string());
+        }
+        args.push("--".into());
+        args.push(self.executable.clone().into_os_string());
+        args
+    }
+}
+
+/// Confine the calling process as the host supervisor, before it execs it.
+#[cfg(target_os = "linux")]
+pub fn confine_supervisor(paths: &SupervisorPaths) -> Result<String, String> {
+    let landlock = linux::restrict_supervisor_filesystem(paths)?;
+    linux::install_seccomp_filter(linux::FilterFor::Supervisor)?;
+    Ok(format!(
+        "Landlock {landlock} (files only), seccomp filter installed"
+    ))
+}
+
+/// Confine the calling process as the host supervisor, before it execs it.
+#[cfg(target_os = "macos")]
+pub fn confine_supervisor(paths: &SupervisorPaths) -> Result<String, String> {
+    macos::apply(&macos::supervisor_profile(paths))?;
+    Ok("Seatbelt profile applied".to_string())
+}
+
+/// Not implemented on other platforms.
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+#[allow(clippy::unnecessary_wraps)] // Same signature as the Linux version.
+pub fn confine_supervisor(_paths: &SupervisorPaths) -> Result<String, String> {
+    Ok("not implemented on this OS".to_string())
+}
+
+/// The driver's confined-exec mode.
+///
+/// Returns `None` unless the process was started with
+/// [`CONFINED_EXEC_FLAG`]. Otherwise it confines itself and execs the program,
+/// and returns an exit code only if that fails. Call it first in `main`, before
+/// any threads start and before parsing other arguments: the supervisor's
+/// environment would otherwise be read as driver options.
+pub fn confined_exec_from_args() -> Option<i32> {
+    use std::os::unix::process::CommandExt;
+
+    let mut args = std::env::args_os().skip(1);
+    if args.next()? != CONFINED_EXEC_FLAG {
+        return None;
+    }
+    let mut paths = SupervisorPaths::default();
+    loop {
+        let Some(arg) = args.next() else {
+            eprintln!("confined-exec: no program to run");
+            return Some(2);
+        };
+        if arg == "--" {
+            break;
+        }
+        let target = match arg.to_str() {
+            Some("--read-write") => &mut paths.read_write,
+            Some("--read-only") => &mut paths.read_only,
+            _ => {
+                eprintln!(
+                    "confined-exec: unexpected argument {}",
+                    arg.to_string_lossy()
+                );
+                return Some(2);
+            }
+        };
+        let Some(path) = args.next() else {
+            eprintln!("confined-exec: {} needs a path", arg.to_string_lossy());
+            return Some(2);
+        };
+        target.push(PathBuf::from(path));
+    }
+    let Some(program) = args.next() else {
+        eprintln!("confined-exec: no program to run");
+        return Some(2);
+    };
+    paths.executable = PathBuf::from(&program);
+
+    match confine_supervisor(&paths) {
+        Ok(status) => eprintln!("host supervisor: confinement: {status}"),
+        Err(err) => {
+            eprintln!("host supervisor: confinement failed: {err}");
+            return Some(1);
+        }
+    }
+    let err = std::process::Command::new(&program).args(args).exec();
+    eprintln!("confined-exec: exec {}: {err}", paths.executable.display());
+    Some(1)
 }
 
 #[cfg(target_os = "macos")]
@@ -102,8 +234,8 @@ mod macos {
         "/dev/random",
     ];
 
-    pub(super) fn apply_seatbelt_profile(paths: &WorkerPaths) -> Result<(), String> {
-        let profile = CString::new(profile(paths))
+    pub(super) fn apply(profile: &str) -> Result<(), String> {
+        let profile = CString::new(profile)
             .map_err(|err| format!("Seatbelt profile has a NUL byte: {err}"))?;
         let mut error: *mut c_char = std::ptr::null_mut();
         // SAFETY: the profile is a valid C string, and `error` receives a
@@ -176,6 +308,63 @@ mod macos {
             ));
         }
         rules.join("\n")
+    }
+
+    /// The host supervisor's profile. It's the network broker and uses the
+    /// system's DNS and TLS services, so this starts from `allow default` and
+    /// takes away the user's files: everything under /Users, /Volumes and the
+    /// user's home is denied except the supervisor's own folders. Later
+    /// Seatbelt rules override earlier ones. It may run only its own binary.
+    pub(super) fn supervisor_profile(paths: &super::SupervisorPaths) -> String {
+        let mut private: Vec<String> = vec![
+            "(subpath \"/Users\")".to_string(),
+            "(subpath \"/Volumes\")".to_string(),
+        ];
+        if let Some(home) = home_dir() {
+            private.push(format!("(subpath \"{}\")", escape(&resolve(&home))));
+        }
+        let private = private.join(" ");
+        let executable = format!("(literal \"{}\")", escape(&resolve(&paths.executable)));
+        let mut rules = vec![
+            "(version 1)".to_string(),
+            "(allow default)".to_string(),
+            format!("(deny file-read* file-write* {private})"),
+            // Path lookups and stat still work there; contents don't.
+            format!("(allow file-read-metadata {private})"),
+        ];
+        if !paths.read_write.is_empty() {
+            let read_write: Vec<String> = paths.read_write.iter().map(|p| filter_for(p)).collect();
+            rules.push(format!(
+                "(allow file-read* file-write* {})",
+                read_write.join(" ")
+            ));
+        }
+        let read_only: Vec<String> = paths
+            .read_only
+            .iter()
+            .map(|p| filter_for(p))
+            .chain(std::iter::once(executable.clone()))
+            .collect();
+        rules.push(format!("(allow file-read* {})", read_only.join(" ")));
+        rules.push("(deny process-exec*)".to_string());
+        rules.push(format!("(allow process-exec {executable})"));
+        rules.join("\n")
+    }
+
+    /// The current user's home folder, from the user database: the
+    /// supervisor's environment is cleared, so HOME isn't set.
+    fn home_dir() -> Option<PathBuf> {
+        // SAFETY: getpwuid returns a pointer into static storage, or null. The
+        // confined-exec helper is single-threaded, and the string is copied
+        // before anything else could call getpwuid.
+        unsafe {
+            let entry = libc::getpwuid(libc::getuid());
+            if entry.is_null() || (*entry).pw_dir.is_null() {
+                return None;
+            }
+            let dir = CStr::from_ptr((*entry).pw_dir);
+            Some(PathBuf::from(dir.to_string_lossy().into_owned()))
+        }
     }
 
     /// `subpath` for a folder, `literal` for a file.
@@ -299,6 +488,82 @@ mod linux {
         .to_string())
     }
 
+    /// System paths the host supervisor may read but not execute from: system
+    /// configuration (DNS, hosts, CA certificates), /proc and /sys, the rest
+    /// of /usr, and the random devices.
+    const SUPERVISOR_READ_ONLY_SYSTEM: &[&str] = &[
+        "/etc",
+        "/usr",
+        "/proc",
+        "/sys",
+        "/dev/urandom",
+        "/dev/random",
+    ];
+
+    /// System files the supervisor reads that are often symlinks out of /etc:
+    /// on hosts with systemd-resolved, /etc/resolv.conf points into
+    /// /run/systemd/resolve. Landlock checks the real path, so each target is
+    /// allowed (read-only) too.
+    const SUPERVISOR_SYSTEM_FILES: &[&str] = &["/etc/resolv.conf", "/etc/hosts"];
+
+    /// Where the dynamic loader and shared libraries live. They need execute
+    /// rights, so the supervisor can start; nothing in them is a shell.
+    const SUPERVISOR_LIBRARIES: &[&str] = &["/usr/lib", "/lib", "/lib64"];
+
+    /// The host supervisor's Landlock ruleset: files only. It's the network
+    /// broker, so its network stays open. It can read system paths, execute
+    /// only from its own folder and the library folders, and read or write
+    /// only its sandbox's state and socket folders.
+    pub(super) fn restrict_supervisor_filesystem(
+        paths: &super::SupervisorPaths,
+    ) -> Result<String, String> {
+        let abi = ABI::V4;
+        let mut read = AccessFs::from_read(abi);
+        read.remove(AccessFs::Execute);
+        let mut ruleset = Ruleset::default()
+            .set_compatibility(CompatLevel::BestEffort)
+            .handle_access(AccessFs::from_all(abi))
+            .map_err(|err| format!("Landlock filesystem rights: {err}"))?
+            .create()
+            .map_err(|err| format!("create Landlock ruleset: {err}"))?;
+
+        let read_only = SUPERVISOR_READ_ONLY_SYSTEM
+            .iter()
+            .map(Path::new)
+            .chain(paths.read_only.iter().map(PathBuf::as_path));
+        for path in read_only {
+            ruleset = allow(ruleset, path, read, abi)?;
+        }
+        for file in SUPERVISOR_SYSTEM_FILES {
+            if let Ok(real) = std::fs::canonicalize(file) {
+                ruleset = allow(ruleset, &real, read, abi)?;
+            }
+        }
+        let executable_dir = paths.executable.parent().unwrap_or_else(|| Path::new("/"));
+        let executable = SUPERVISOR_LIBRARIES
+            .iter()
+            .map(Path::new)
+            .chain(std::iter::once(executable_dir));
+        for path in executable {
+            ruleset = allow(ruleset, path, AccessFs::from_read(abi), abi)?;
+        }
+        let read_write = std::iter::once(Path::new("/dev/null"))
+            .chain(paths.read_write.iter().map(PathBuf::as_path));
+        for path in read_write {
+            ruleset = allow(ruleset, path, AccessFs::from_all(abi), abi)?;
+        }
+
+        let status = ruleset
+            .restrict_self()
+            .map_err(|err| format!("enforce Landlock ruleset: {err}"))?;
+        Ok(match status.ruleset {
+            RulesetStatus::FullyEnforced => "fully enforced",
+            RulesetStatus::PartiallyEnforced => "partially enforced (older kernel)",
+            RulesetStatus::NotEnforced => "not enforced (kernel without Landlock)",
+        }
+        .to_string())
+    }
+
     fn allow(
         ruleset: RulesetCreated,
         path: &Path,
@@ -321,25 +586,44 @@ mod linux {
             .map_err(|err| format!("Landlock rule for {}: {err}", path.display()))
     }
 
+    /// Which process the seccomp filter is for.
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    pub(super) enum FilterFor {
+        /// The libkrun worker: Unix sockets only, and no exec.
+        Worker,
+        /// The host supervisor: it needs the network, and the filter is
+        /// installed before it is exec'd, so exec stays allowed. Landlock
+        /// limits what it can execute instead.
+        Supervisor,
+    }
+
     #[allow(unsafe_code)]
-    pub(super) fn install_seccomp_filter() -> Result<(), String> {
+    pub(super) fn install_seccomp_filter(filter_for: FilterFor) -> Result<(), String> {
         let mut rules: BTreeMap<i64, Vec<SeccompRule>> = BTreeMap::new();
-        // Sockets other than AF_UNIX: the worker's only channels are Unix
-        // sockets, and it has no network.
-        let not_unix = SeccompCondition::new(
-            0,
-            SeccompCmpArgLen::Dword,
-            SeccompCmpOp::Ne,
-            libc::AF_UNIX as u64,
-        )
-        .map_err(|err| format!("seccomp socket condition: {err}"))?;
-        rules.insert(
-            libc::SYS_socket,
-            vec![SeccompRule::new(vec![not_unix]).map_err(|err| format!("seccomp rule: {err}"))?],
-        );
+        if filter_for == FilterFor::Worker {
+            // Sockets other than AF_UNIX: the worker's only channels are Unix
+            // sockets, and it has no network.
+            let not_unix = SeccompCondition::new(
+                0,
+                SeccompCmpArgLen::Dword,
+                SeccompCmpOp::Ne,
+                libc::AF_UNIX as u64,
+            )
+            .map_err(|err| format!("seccomp socket condition: {err}"))?;
+            rules.insert(
+                libc::SYS_socket,
+                vec![
+                    SeccompRule::new(vec![not_unix])
+                        .map_err(|err| format!("seccomp rule: {err}"))?,
+                ],
+            );
+        }
         // An empty rule list matches every call.
         for syscall in DENIED_SYSCALLS {
-            rules.insert(*syscall, Vec::new());
+            let exec = matches!(*syscall, libc::SYS_execve | libc::SYS_execveat);
+            if filter_for == FilterFor::Worker || !exec {
+                rules.insert(*syscall, Vec::new());
+            }
         }
 
         let architecture = std::env::consts::ARCH
@@ -371,7 +655,7 @@ mod linux {
 #[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
 #[allow(unsafe_code)]
 mod tests {
-    use super::{WorkerPaths, confine};
+    use super::{SupervisorPaths, WorkerPaths, confine, confine_supervisor};
     use std::os::unix::net::{UnixListener, UnixStream};
 
     // Bits the confined child sets for each check that came out wrong.
@@ -430,6 +714,82 @@ mod tests {
             }
             if std::process::Command::new("/bin/true").status().is_ok() {
                 failures |= EXEC_ALLOWED;
+            }
+            unsafe { libc::_exit(failures) };
+        }
+
+        let mut status = 0;
+        // SAFETY: waits for the child forked above.
+        unsafe { libc::waitpid(pid, &raw mut status, 0) };
+        assert!(
+            libc::WIFEXITED(status),
+            "child didn't exit normally: {status}"
+        );
+        assert_eq!(libc::WEXITSTATUS(status), 0, "failed checks (bit flags)");
+    }
+
+    /// Forks a child and confines it as the host supervisor. It must keep the
+    /// network and its own folder, and lose other programs and other files:
+    /// another folder on Linux (Landlock allows only listed paths), and the
+    /// user's home on macOS (the profile denies /Users and the home folder).
+    #[test]
+    fn confined_supervisor_keeps_network_and_its_folder_but_runs_nothing_else() {
+        const WRITE_OWN_PATH_FAILED: i32 = 1;
+        const PRIVATE_FILES_READABLE: i32 = 2;
+        const TCP_CONNECT_FAILED: i32 = 4;
+        const SHELL_RAN: i32 = 8;
+        const CONFINE_FAILED: i32 = 16;
+
+        let allowed = tempfile::tempdir().expect("allowed dir");
+        let other = tempfile::tempdir().expect("other dir");
+        let secret = other.path().join("secret");
+        std::fs::write(&secret, b"not for the supervisor").expect("write secret");
+        let tcp = std::net::TcpListener::bind("127.0.0.1:0").expect("tcp listener");
+        let tcp_address = tcp.local_addr().expect("tcp address");
+        let paths = SupervisorPaths {
+            read_write: vec![allowed.path().to_path_buf()],
+            read_only: Vec::new(),
+            // Its only program; it doesn't need to exist for this test.
+            executable: allowed.path().join("openshell-supervisor"),
+        };
+        let own_file = allowed.path().join("supervisor.log");
+
+        // SAFETY: the child only runs the checks below and then calls _exit.
+        let pid = unsafe { libc::fork() };
+        assert!(pid >= 0, "fork failed");
+        if pid == 0 {
+            let mut failures = 0;
+            let Ok(status) = confine_supervisor(&paths) else {
+                unsafe { libc::_exit(CONFINE_FAILED) }
+            };
+            if std::fs::write(&own_file, b"ok").is_err() {
+                failures |= WRITE_OWN_PATH_FAILED;
+            }
+            #[cfg(target_os = "linux")]
+            let private_readable =
+                status.contains("fully enforced") && std::fs::read(&secret).is_ok();
+            #[cfg(target_os = "macos")]
+            let private_readable = {
+                let _ = &status;
+                std::env::var_os("HOME").is_some_and(|home| std::fs::read_dir(home).is_ok())
+            };
+            if private_readable {
+                failures |= PRIVATE_FILES_READABLE;
+            }
+            #[allow(
+                clippy::disallowed_methods,
+                reason = "probe connect that must succeed; it carries no data"
+            )]
+            let tcp_connected = std::net::TcpStream::connect(tcp_address).is_ok();
+            if !tcp_connected {
+                failures |= TCP_CONNECT_FAILED;
+            }
+            if std::process::Command::new("/bin/sh")
+                .args(["-c", "true"])
+                .status()
+                .is_ok()
+            {
+                failures |= SHELL_RAN;
             }
             unsafe { libc::_exit(failures) };
         }

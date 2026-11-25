@@ -52,3 +52,5 @@ pub use runtime::{
     VM_RUNTIME_DIR_ENV, VmBackend, VmLaunchConfig, VmMount, VsockPortMap, configured_runtime_dir,
     run_vm,
 };
+#[cfg(feature = "compute-driver")]
+pub use worker_confinement::confined_exec_from_args;

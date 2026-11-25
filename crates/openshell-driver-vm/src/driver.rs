@@ -1427,7 +1427,28 @@ impl VmDriver {
         .map_err(|error| Status::internal(format!("encode main process spec: {error}")))?;
         let upstream_proxy_args = upstream_proxy_cli_args(&self.config)
             .map_err(|error| Status::invalid_argument(format!("render upstream proxy: {error}")))?;
-        let mut command = Command::new(&supervisor_binary);
+        // Launch the supervisor through this driver's confined-exec mode, so
+        // it can reach only its own sandbox's files and run no other program
+        // (see worker_confinement). OPENSHELL_VM_WORKER_CONFINEMENT=off skips it.
+        let mut command = if crate::worker_confinement::disabled() {
+            Command::new(&supervisor_binary)
+        } else {
+            let mut read_only: Vec<PathBuf> =
+                tls_paths.map(|tls| tls.ca.clone()).into_iter().collect();
+            read_only.extend(self.config.upstream_proxy.proxy_auth_file.iter().cloned());
+            read_only.extend(self.config.proxy_ca_bundle.iter().cloned());
+            let paths = crate::worker_confinement::SupervisorPaths {
+                read_write: vec![
+                    state_dir.to_path_buf(),
+                    sandbox_socket_dir(&self.socket_root, &sandbox.id),
+                ],
+                read_only,
+                executable: supervisor_binary.clone(),
+            };
+            let mut command = Command::new(&self.launcher_bin);
+            command.args(paths.confined_exec_args());
+            command
+        };
         isolate_host_control_environment(&mut command);
         command
             .kill_on_drop(true)
