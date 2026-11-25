@@ -464,6 +464,11 @@ fn worker_confinement_paths(
     crate::worker_confinement::WorkerPaths {
         read_write,
         read_only,
+        unix_sockets: config
+            .vsock_port_map
+            .iter()
+            .map(|port_map| port_map.host_socket.clone())
+            .collect(),
     }
 }
 
